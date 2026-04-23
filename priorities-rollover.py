@@ -15,7 +15,6 @@ from config import JOURNAL_DIR
 TODAY = date.today()
 YESTERDAY = TODAY - timedelta(days=1)
 
-JOURNAL_DIR = JOURNAL_DIR
 PRIORITIES_SCRIPT = Path(__file__).parent / "priorities.py"
 
 def get_incomplete_priorities(journal_path: Path) -> list[str]:
