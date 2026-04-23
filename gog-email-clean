@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""
+gog-email-clean — Fetch a Gmail thread with --full and strip HTML for clean text.
+
+Usage:
+  gog-email-clean <thread-id> [--account ACCOUNT] [--client CLIENT]
+
+Account defaults to steven@stevenkasapi.net if not specified.
+"""
+import subprocess
+import sys
+import re
+import html
+import os
+import argparse
+
+
+def fetch_thread(thread_id, account, client):
+    env = {**os.environ, "GOG_KEYRING_PASSWORD": ""}
+    cmd = [
+        "gog", "gmail", "thread", "get", thread_id,
+        "--account", account,
+        "--client", client,
+        "--full"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        print(f"Error: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return result.stdout
+
+
+def clean(text):
+    # Isolate body (after Date: line)
+    body_start = text.find("\n\n")
+    body = text[body_start:] if body_start != -1 else text
+
+    # Strip HTML tags
+    body = re.sub(r"<[^>]+>", " ", body)
+    # Decode HTML entities
+    body = html.unescape(body)
+    # Collapse whitespace
+    body = re.sub(r"\s+", " ", body).strip()
+
+    # Print header (before body)
+    header = text[:body_start] if body_start != -1 else text
+    print(header.strip())
+    print()
+    print(body)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch Gmail thread and strip HTML")
+    parser.add_argument("thread_id", help="Gmail thread ID")
+    parser.add_argument("--account", default="steven@stevenkasapi.net")
+    parser.add_argument("--client", default="mail")
+    args = parser.parse_args()
+
+    text = fetch_thread(args.thread_id, args.account, args.client)
+    clean(text)
+
+
+if __name__ == "__main__":
+    main()
