@@ -882,6 +882,25 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
         }
         _write_progress(state)
 
+    # Progress bar only when running interactively in a TTY
+    pbar = None
+    if sys.stdout.isatty():
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(total=len(files_to_scan), unit="file", dynamic_ncols=True,
+                        desc="Indexing")
+        except ImportError:
+            pbar = None
+
+    def _bar_postfix():
+        if pbar is None:
+            return
+        c = counts
+        pbar.set_postfix_str(
+            f"new={c['new']} unch={c['unchanged']} mvd={c['moved']} err={c['error']}",
+            refresh=False,
+        )
+
     try:
         emit_progress(processed_files=0, current_file=None, phase="indexing")
 
@@ -890,6 +909,9 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             seen_paths.add(rel)
             # Emit BEFORE processing so current_file shows what's being worked on live
             emit_progress(processed_files=i - 1, current_file=rel, phase="indexing")
+            if pbar is not None:
+                # Truncate long paths for the bar
+                pbar.set_description_str(f"Indexing {rel[-60:]}")
             try:
                 result = index_file(con, vault_path, abs_path)
                 counts[result["status"]] = counts.get(result["status"], 0) + 1
@@ -897,22 +919,37 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
                 counts["error"] += 1
                 emit_progress(processed_files=i, current_file=rel,
                               phase="indexing", last_error=f"{rel}: {e}")
+                if pbar is not None:
+                    pbar.update(1)
+                    _bar_postfix()
                 continue
             # Emit after each file so counts update live
             emit_progress(processed_files=i, current_file=rel, phase="indexing")
+            if pbar is not None:
+                pbar.update(1)
+                _bar_postfix()
+
+        if pbar is not None:
+            pbar.close()
+            pbar = None
 
         # Delete orphans — files in DB but no longer in vault (only when scanning whole vault)
         if vault_path == VAULT_DIR:
             emit_progress(processed_files=len(files_to_scan), phase="deleting_orphans")
             rows = con.execute("SELECT id, path FROM files").fetchall()
-            for row in rows:
-                if row["path"] not in seen_paths:
-                    con.execute(
-                        "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?)",
-                        (row["id"],),
-                    )
-                    con.execute("DELETE FROM files WHERE id=?", (row["id"],))
-                    counts["deleted"] += 1
+            orphans = [r for r in rows if r["path"] not in seen_paths]
+            if sys.stdout.isatty() and orphans:
+                from tqdm import tqdm
+                orphan_iter = tqdm(orphans, unit="file", desc="Deleting orphans")
+            else:
+                orphan_iter = orphans
+            for row in orphan_iter:
+                con.execute(
+                    "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?)",
+                    (row["id"],),
+                )
+                con.execute("DELETE FROM files WHERE id=?", (row["id"],))
+                counts["deleted"] += 1
         con.commit()
 
         if report_progress:
@@ -942,6 +979,8 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             })
         raise
     finally:
+        if pbar is not None:
+            pbar.close()
         if report_progress:
             _release_lock()
 
