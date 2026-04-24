@@ -93,7 +93,12 @@ async def list_tools() -> list[types.Tool]:
         # --- journal-log ---
         types.Tool(
             name="log_entry",
-            description="Append a timestamped entry to the daily journal. Handles file creation, chronological insertion, and frontmatter people tagging.",
+            description=(
+                "Append a timestamped entry to the daily journal. Handles file creation, "
+                "chronological insertion, and frontmatter people/tag tagging. "
+                "Tag each entry with 1-3 relevant topical tags from Steven's common vocabulary "
+                "(work, social, food, travel, family, health, photography, tech, dev, running, nvidia, etc.)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -111,6 +116,15 @@ async def list_tools() -> list[types.Tool]:
                             },
                             "required": ["name"]
                         }
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": (
+                            "Topical tags for this entry (1-3 recommended). Use Steven's existing vocabulary "
+                            "when possible: work, social, food, travel, family, health, photography, tech, "
+                            "dev, running, strength-training, nvidia, packing, etc. Tags accumulate across entries in the day."
+                        ),
+                        "items": {"type": "string"}
                     }
                 },
                 "required": ["entry"]
@@ -391,6 +405,9 @@ def _dispatch(name: str, args: dict) -> str:
             for p in args["people"]:
                 pid = p.get("id")
                 argv.append(f"{p['name']}:{pid}" if pid else p["name"])
+        if args.get("tags"):
+            argv.append("--tags")
+            argv.extend(args["tags"])
         return _run(jlog.main, argv)
 
     elif name == "init_journal":

@@ -79,6 +79,7 @@ def main():
     parser.add_argument("--date", default="", help="Date YYYY-MM-DD (default: today in Steven's local time)")
     parser.add_argument("--init", action="store_true", help="Create today's journal file if it doesn't exist (no entry needed)")
     parser.add_argument("--people", nargs="+", metavar="NAME:ID", help="Add people to frontmatter (e.g., 'Harry Chen:169' 'Jane Doe:42')")
+    parser.add_argument("--tags", nargs="+", metavar="TAG", help="Add tags to frontmatter (e.g., 'work' 'nvidia')")
     args = parser.parse_args()
 
     if not args.init and not args.entry:
@@ -117,8 +118,9 @@ def main():
         with open(journal_path, "a") as f:
             f.write("\n" + entry_text + "\n")
 
+    header_script = Path(__file__).parent / "journal-header.py"
+
     if args.people:
-        header_script = Path(__file__).parent / "journal-header.py"
         for person_spec in args.people:
             if ":" in person_spec:
                 name, pid = person_spec.rsplit(":", 1)
@@ -126,6 +128,13 @@ def main():
             else:
                 cmd = ["python3", str(header_script), "--date", date_str, "--add-person", person_spec]
             subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+    if args.tags:
+        for tag in args.tags:
+            subprocess.run(
+                ["python3", str(header_script), "--date", date_str, "--add-tag", tag],
+                capture_output=True, text=True, timeout=10
+            )
 
     print(f"Logged — {timestamp}")
 
