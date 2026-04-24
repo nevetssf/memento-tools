@@ -153,6 +153,21 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}}
         ),
         types.Tool(
+            name="add_producer",
+            description="Create a new producer file without adding a bottle. Use when you want to record a producer before tasting any specific bottles.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": type_prop,
+                    "producer": producer_prop,
+                    "region": {"type": "string"},
+                    "country": {"type": "string"},
+                    "style": {"type": "string", "description": "Whiskey type or gin style"},
+                },
+                "required": ["type", "producer"]
+            }
+        ),
+        types.Tool(
             name="add_bottle",
             description="Add a new bottle entry to a producer's note. Creates the producer file if it doesn't exist.",
             inputSchema={
@@ -265,6 +280,19 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 def _dispatch(name: str, args: dict) -> str:
     if name == "get_types":
         return json.dumps({"types": VALID_TYPES})
+
+    if name == "add_producer":
+        type_ = args["type"].lower()
+        if type_ not in VALID_TYPES:
+            return json.dumps({"error": f"Invalid type '{type_}'. Valid: {VALID_TYPES}"})
+        producer = args["producer"]
+        path = producer_path(type_, producer)
+        if path.exists():
+            return json.dumps({"ok": False, "message": f"Producer '{producer}' already exists", "file": str(path)})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = FM_TEMPLATES[type_](producer, args.get("region", ""), args.get("country", ""))
+        path.write_text(header)
+        return json.dumps({"ok": True, "file": str(path), "producer": producer, "type": type_})
 
     if name == "add_bottle":
         type_ = args["type"].lower()
