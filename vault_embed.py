@@ -11,6 +11,7 @@ Builds and queries a local SQLite index of vault contents with:
 """
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -533,16 +534,86 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dic
 
 
 # ---------------------------------------------------------------------------
+# Progress tracking & locking
+# ---------------------------------------------------------------------------
+
+PROGRESS_FILE = EMBED_DB_PATH.parent / "index-progress.json"
+LOCK_FILE = EMBED_DB_PATH.parent / "index.lock"
+
+
+def _write_progress(state: dict) -> None:
+    PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PROGRESS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(PROGRESS_FILE)
+
+
+def read_progress() -> dict | None:
+    """Return the current or last-run progress state, or None if never run."""
+    if not PROGRESS_FILE.exists():
+        return None
+    try:
+        state = json.loads(PROGRESS_FILE.read_text())
+    except Exception:
+        return None
+    # Detect stale 'running' state: lock gone or PID dead
+    if state.get("status") == "running":
+        pid = state.get("pid")
+        if pid and not _pid_alive(pid):
+            state["status"] = "failed"
+            state["error"] = "Process died without finishing"
+    return state
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except Exception:
+        return False
+
+
+def _acquire_lock() -> bool:
+    """Returns True if lock acquired; False if another indexing run is active."""
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            if _pid_alive(pid):
+                return False
+        except (ValueError, OSError):
+            pass
+        # stale — clear and take it
+        LOCK_FILE.unlink(missing_ok=True)
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_FILE.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Full vault reconciliation
 # ---------------------------------------------------------------------------
 
 def reconcile(con: sqlite3.Connection, vault_path: Path = None,
-              skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates")) -> dict:
-    """Walk the vault, add/update/delete/move as needed. Returns counts by status."""
-    vault_path = vault_path or VAULT_DIR
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "moved": 0, "deleted": 0, "skipped": 0, "error": 0}
-    seen_paths: set[str] = set()
+              skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates"),
+              *, report_progress: bool = True) -> dict:
+    """Walk the vault, add/update/delete/move as needed. Returns counts by status.
 
+    Writes progress to PROGRESS_FILE every file so callers can poll the state.
+    Refuses to run if another indexing process holds the lock.
+    """
+    vault_path = vault_path or VAULT_DIR
+
+    if report_progress and not _acquire_lock():
+        raise RuntimeError("Another indexing run is in progress (lock file exists)")
+
+    # First pass: enumerate files so we know the total for progress
+    files_to_scan: list[Path] = []
     for abs_path in vault_path.rglob("*"):
         if not abs_path.is_file():
             continue
@@ -550,23 +621,89 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             continue
         if abs_path.suffix.lower() not in (".md", ".pdf"):
             continue
-        rel = str(abs_path.relative_to(vault_path))
-        seen_paths.add(rel)
-        result = index_file(con, vault_path, abs_path)
-        counts[result["status"]] = counts.get(result["status"], 0) + 1
+        files_to_scan.append(abs_path)
 
-    # Delete orphans — files in DB but no longer in vault
-    rows = con.execute("SELECT id, path FROM files").fetchall()
-    for row in rows:
-        if row["path"] not in seen_paths:
-            con.execute(
-                "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?)",
-                (row["id"],),
-            )
-            con.execute("DELETE FROM files WHERE id=?", (row["id"],))
-            counts["deleted"] += 1
-    con.commit()
-    return counts
+    counts = {"new": 0, "updated": 0, "unchanged": 0, "moved": 0, "deleted": 0, "skipped": 0, "error": 0}
+    seen_paths: set[str] = set()
+    started_at = datetime.now(tz=timezone.utc).isoformat()
+
+    def emit_progress(**extra):
+        if not report_progress:
+            return
+        state = {
+            "status": "running",
+            "pid": os.getpid(),
+            "started_at": started_at,
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+            "scope": str(vault_path),
+            "total_files": len(files_to_scan),
+            "counts": counts,
+            **extra,
+        }
+        _write_progress(state)
+
+    try:
+        emit_progress(processed_files=0, current_file=None, phase="indexing")
+
+        for i, abs_path in enumerate(files_to_scan, start=1):
+            rel = str(abs_path.relative_to(vault_path))
+            seen_paths.add(rel)
+            # Emit BEFORE processing so current_file shows what's being worked on live
+            emit_progress(processed_files=i - 1, current_file=rel, phase="indexing")
+            try:
+                result = index_file(con, vault_path, abs_path)
+                counts[result["status"]] = counts.get(result["status"], 0) + 1
+            except Exception as e:
+                counts["error"] += 1
+                emit_progress(processed_files=i, current_file=rel,
+                              phase="indexing", last_error=f"{rel}: {e}")
+                continue
+            # Emit after each file so counts update live
+            emit_progress(processed_files=i, current_file=rel, phase="indexing")
+
+        # Delete orphans — files in DB but no longer in vault (only when scanning whole vault)
+        if vault_path == VAULT_DIR:
+            emit_progress(processed_files=len(files_to_scan), phase="deleting_orphans")
+            rows = con.execute("SELECT id, path FROM files").fetchall()
+            for row in rows:
+                if row["path"] not in seen_paths:
+                    con.execute(
+                        "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?)",
+                        (row["id"],),
+                    )
+                    con.execute("DELETE FROM files WHERE id=?", (row["id"],))
+                    counts["deleted"] += 1
+        con.commit()
+
+        if report_progress:
+            _write_progress({
+                "status": "completed",
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+                "scope": str(vault_path),
+                "total_files": len(files_to_scan),
+                "processed_files": len(files_to_scan),
+                "counts": counts,
+            })
+        return counts
+
+    except Exception as e:
+        if report_progress:
+            _write_progress({
+                "status": "failed",
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+                "scope": str(vault_path),
+                "total_files": len(files_to_scan),
+                "counts": counts,
+                "error": f"{type(e).__name__}: {e}",
+            })
+        raise
+    finally:
+        if report_progress:
+            _release_lock()
 
 
 # ---------------------------------------------------------------------------
@@ -677,3 +814,27 @@ def index_stats(con: sqlite3.Connection) -> dict:
         "embed_model": EMBED_MODEL_NAME,
         "embed_dims": EMBED_DIMS,
     }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point (used by background indexing)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--reconcile", action="store_true", help="Run full vault reconciliation")
+    parser.add_argument("--path", help="Subpath under vault to scan (default: full vault)")
+    args = parser.parse_args()
+
+    if args.reconcile:
+        scope = VAULT_DIR / args.path if args.path else VAULT_DIR
+        con = connect()
+        try:
+            counts = reconcile(con, scope)
+            print(json.dumps({"ok": True, "counts": counts}))
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)
+            sys.exit(1)
+    else:
+        parser.print_help()

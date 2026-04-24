@@ -10,6 +10,7 @@ Wraps vault_embed.py with four tools:
 """
 import asyncio
 import json
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +34,8 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Reconcile the Obsidian vault with the semantic search index. "
                 "Adds new files, updates changed ones, detects moves, deletes orphans. "
-                "Safe to call repeatedly; only changed files get re-embedded."
+                "Safe to call repeatedly; only changed files get re-embedded. "
+                "For a full-vault scan, pass background=true and poll index_progress to check status."
             ),
             inputSchema={
                 "type": "object",
@@ -41,9 +43,22 @@ async def list_tools() -> list[types.Tool]:
                     "path": {
                         "type": "string",
                         "description": "Optional subdirectory under the vault to limit the scan (e.g. 'Journal'). Defaults to the full vault."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run in background (default: false). When true, returns immediately; poll index_progress to track."
                     }
                 }
             },
+        ),
+        types.Tool(
+            name="index_progress",
+            description=(
+                "Report the status of the current or most recent indexing run. "
+                "Returns phase (indexing/deleting_orphans/completed/failed), processed/total file counts, "
+                "current file, counts by status, and timestamps."
+            ),
+            inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="semantic_search",
@@ -108,9 +123,45 @@ def _dispatch(name: str, args: dict) -> str:
         vault_path = VAULT_DIR / subpath if subpath else VAULT_DIR
         if not vault_path.exists():
             return json.dumps({"error": f"Path not found: {vault_path}"})
-        # When scanning a subdir, still pass VAULT_DIR as root so paths are relative to vault
-        counts = ve.reconcile(con, VAULT_DIR) if not subpath else _reconcile_subdir(con, vault_path)
-        return json.dumps({"ok": True, "counts": counts, "path": str(vault_path)})
+
+        # Reject if another run is in progress
+        existing = ve.read_progress()
+        if existing and existing.get("status") == "running":
+            return json.dumps({"ok": False, "error": "An indexing run is already in progress", "progress": existing})
+
+        if args.get("background"):
+            # Spawn detached subprocess
+            script = Path(__file__).parent / "vault_embed.py"
+            cmd = [sys.executable, str(script), "--reconcile"]
+            if subpath:
+                cmd += ["--path", subpath]
+            log = Path(str(ve.EMBED_DB_PATH.parent / "index.log"))
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "a") as f:
+                proc = subprocess.Popen(
+                    cmd, stdout=f, stderr=f,
+                    start_new_session=True,
+                )
+            return json.dumps({
+                "ok": True,
+                "background": True,
+                "pid": proc.pid,
+                "scope": str(vault_path),
+                "note": "Poll index_progress to check status.",
+            })
+
+        # Synchronous
+        if subpath:
+            counts = _reconcile_subdir(con, vault_path)
+        else:
+            counts = ve.reconcile(con, VAULT_DIR)
+        return json.dumps({"ok": True, "background": False, "counts": counts, "path": str(vault_path)})
+
+    if name == "index_progress":
+        state = ve.read_progress()
+        if not state:
+            return json.dumps({"status": "never_run"})
+        return json.dumps(state)
 
     if name == "semantic_search":
         hits = ve.semantic_search(
@@ -143,16 +194,8 @@ def _dispatch(name: str, args: dict) -> str:
 
 
 def _reconcile_subdir(con, subdir_path: Path) -> dict:
-    """Reconcile a subdirectory: updates matching files, does NOT delete orphans outside the subdir."""
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "moved": 0, "skipped": 0, "error": 0}
-    for abs_path in subdir_path.rglob("*"):
-        if not abs_path.is_file() or abs_path.suffix.lower() not in (".md", ".pdf"):
-            continue
-        if any(skip in abs_path.parts for skip in (".obsidian", ".trash", "Templates")):
-            continue
-        result = ve.index_file(con, VAULT_DIR, abs_path)
-        counts[result["status"]] = counts.get(result["status"], 0) + 1
-    return counts
+    """Reconcile a subdirectory with progress reporting; does NOT delete orphans outside the subdir."""
+    return ve.reconcile(con, subdir_path)
 
 
 async def main():
