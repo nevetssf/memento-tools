@@ -24,7 +24,7 @@ from mcp.server.stdio import stdio_server
 sys.path.insert(0, str(Path(__file__).parent))
 from config import TODOIST_TOKEN
 
-API_BASE = "https://api.todoist.com/rest/v2"
+API_BASE = "https://api.todoist.com/api/v1"
 
 app = Server("todoist")
 
@@ -56,7 +56,11 @@ def _request(method: str, path: str, body: dict | None = None, params: dict | No
 
 
 def _get(path: str, **params) -> list | dict:
-    return _request("GET", path, params=params or None)
+    """GET, auto-unwrapping {'results': [...]} list responses."""
+    r = _request("GET", path, params=params or None)
+    if isinstance(r, dict) and "results" in r and len(r) <= 3:
+        return r["results"]
+    return r
 
 
 def _post(path: str, body: dict | None = None) -> dict | None:
@@ -96,7 +100,8 @@ def _project_id(name_or_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _task_summary(t: dict) -> dict:
-    """Return a compact, human-friendly view of a Todoist task."""
+    """Return a compact, human-friendly view of a Todoist task (v1 API shape)."""
+    due = t.get("due") or {}
     return {
         "id": t["id"],
         "content": t["content"],
@@ -104,10 +109,10 @@ def _task_summary(t: dict) -> dict:
         "project_id": t.get("project_id"),
         "priority": t.get("priority"),  # 1=low..4=urgent
         "labels": t.get("labels") or [],
-        "due": (t.get("due") or {}).get("string"),
-        "due_date": (t.get("due") or {}).get("date"),
-        "is_completed": t.get("is_completed", False),
-        "url": t.get("url"),
+        "due": due.get("string"),
+        "due_date": due.get("date"),
+        "is_completed": t.get("checked", False) or t.get("is_completed", False),
+        "url": t.get("url") or f"https://todoist.com/app/task/{t['id']}",
     }
 
 
