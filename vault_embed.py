@@ -305,6 +305,55 @@ def chunk_pdf(path: Path) -> tuple[list[tuple[str, str, int]], dict]:
     return [(h, c, p) for h, c, p in chunks if count_tokens(c) >= MIN_CHUNK_TOKENS], meta
 
 
+def chunk_text(text: str, title: str = "") -> list[tuple[str, str]]:
+    """Split plain text into (heading, content) chunks by paragraph windows."""
+    text = text.strip()
+    if not text:
+        return []
+    if count_tokens(text) <= MAX_CHUNK_TOKENS:
+        return [(title, text)] if text else []
+    return [(title, w) for w in _paragraph_windows(text, MAX_CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS)
+            if count_tokens(w) >= MIN_CHUNK_TOKENS]
+
+
+def chunk_html(html: str) -> tuple[list[tuple[str, str]], dict]:
+    """Extract text from HTML and chunk by heading structure. Returns (chunks, metadata)."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Metadata: title, description
+    meta = {}
+    if soup.title and soup.title.string:
+        meta["title"] = soup.title.string.strip()
+    desc = soup.find("meta", attrs={"name": "description"})
+    if desc and desc.get("content"):
+        meta["description"] = desc["content"].strip()
+    author = soup.find("meta", attrs={"name": "author"})
+    if author and author.get("content"):
+        meta["author"] = author["content"].strip()
+
+    # Strip non-content elements
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        tag.decompose()
+
+    # Convert headings to markdown-style so chunk_markdown can handle them
+    body = soup.body or soup
+    lines = []
+    for el in body.descendants:
+        if el.name in ("h1", "h2", "h3", "h4"):
+            level = int(el.name[1])
+            text = el.get_text(strip=True)
+            if text:
+                lines.append(f"{'#' * level} {text}")
+        elif el.name in ("p", "li", "pre", "blockquote"):
+            text = el.get_text(" ", strip=True)
+            if text:
+                lines.append(text)
+
+    pseudo_md = "\n\n".join(lines)
+    return chunk_markdown(pseudo_md), meta
+
+
 def _paragraph_windows(text: str, max_tokens: int, overlap_tokens: int):
     paragraphs = [p for p in re.split(r"\n\n+|\n(?=[A-Z])", text) if p.strip()]
     window: list[str] = []
@@ -418,9 +467,11 @@ def _first_h1(text: str) -> str:
 def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dict:
     """Index a single file. Returns {'status': 'new|updated|moved|unchanged|skipped', 'chunks': N}."""
     rel_path = abs_path.relative_to(vault_path)
-    file_type = abs_path.suffix.lower().lstrip(".")
-    if file_type not in ("md", "pdf"):
-        return {"status": "skipped", "reason": "unsupported type"}
+    ext = abs_path.suffix.lower().lstrip(".")
+    # Normalize extensions to a canonical file_type
+    file_type = {"markdown": "md", "htm": "html"}.get(ext, ext)
+    if file_type not in ("md", "pdf", "html", "txt"):
+        return {"status": "skipped", "reason": f"unsupported type: {ext}"}
 
     raw_bytes = abs_path.read_bytes()
     hash_ = hashlib.sha256(raw_bytes).hexdigest()
@@ -459,12 +510,29 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dic
         tags = extract_tags(fm)
         raw_chunks = chunk_markdown(body)
         chunk_tuples = [(h, c, None) for h, c in raw_chunks]
-    else:  # pdf
-        chunk_tuples, pdf_meta = chunk_pdf(abs_path)
+    elif file_type == "pdf":
+        chunk_tuples_raw, pdf_meta = chunk_pdf(abs_path)
         title = pdf_meta.get("title") or abs_path.stem
         frontmatter_json = json.dumps(pdf_meta)
         date = None
         tags = ""
+        chunk_tuples = chunk_tuples_raw  # already (heading, content, page_num)
+    elif file_type == "html":
+        html = raw_bytes.decode("utf-8", errors="replace")
+        raw_chunks, html_meta = chunk_html(html)
+        title = html_meta.get("title") or abs_path.stem
+        frontmatter_json = json.dumps(html_meta)
+        date = None
+        tags = ""
+        chunk_tuples = [(h, c, None) for h, c in raw_chunks]
+    else:  # txt
+        text = raw_bytes.decode("utf-8", errors="replace")
+        title = abs_path.stem
+        frontmatter_json = json.dumps({})
+        date = None
+        tags = ""
+        raw_chunks = chunk_text(text, title)
+        chunk_tuples = [(h, c, None) for h, c in raw_chunks]
 
     section = section_from_path(rel_path)
 
@@ -619,7 +687,7 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             continue
         if any(skip in abs_path.parts for skip in skip_dirs):
             continue
-        if abs_path.suffix.lower() not in (".md", ".pdf"):
+        if abs_path.suffix.lower() not in (".md", ".markdown", ".pdf", ".html", ".htm", ".txt"):
             continue
         files_to_scan.append(abs_path)
 
