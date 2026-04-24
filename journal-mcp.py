@@ -331,8 +331,22 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "image_path": {"type": "string", "description": "Absolute path to the image file"},
-                    "caption": {"type": "string", "description": "Steven's verbatim comment about the photo"},
-                    "description": {"type": "string", "description": "Auto-generated image description"},
+                    "caption": {
+                        "type": "string",
+                        "description": (
+                            "Only Steven's OWN words about the photo (what he actually typed/said). "
+                            "OMIT this parameter entirely if Steven sent the photo with no comment. "
+                            "NEVER copy the AI-generated Description here."
+                        )
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "The AI-generated image description (text after 'Description:' in the [Image] block). "
+                            "Renders in italics as an alt-text-style note. "
+                            "Always pass this when the [Image] block is present, regardless of whether Steven commented."
+                        )
+                    },
                     "date": date_prop
                 },
                 "required": ["image_path"]
