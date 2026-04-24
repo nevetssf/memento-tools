@@ -185,6 +185,54 @@ def content_hash(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# .embedignore — gitignore-style pattern matching for skip rules
+# ---------------------------------------------------------------------------
+
+def load_ignore_patterns(vault_path: Path) -> list[tuple[str, bool]]:
+    """Load patterns from .embedignore at vault root.
+
+    Returns list of (pattern, is_negation) tuples. Lines starting with '!'
+    are negations (re-include). '#' starts a comment. Blank lines ignored.
+    """
+    f = vault_path / ".embedignore"
+    if not f.exists():
+        return []
+    patterns: list[tuple[str, bool]] = []
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        is_neg = line.startswith("!")
+        if is_neg:
+            line = line[1:].strip()
+        line = line.rstrip("/")
+        if line:
+            patterns.append((line, is_neg))
+    return patterns
+
+
+def matches_ignore(rel_path: Path, patterns: list[tuple[str, bool]]) -> bool:
+    """Test rel_path against patterns. Later patterns override earlier."""
+    import fnmatch
+    skip = False
+    parts = rel_path.parts
+    posix = rel_path.as_posix()
+    for pattern, is_neg in patterns:
+        matched = False
+        if "/" in pattern:
+            # Path-style: glob match or prefix match
+            if fnmatch.fnmatch(posix, pattern) or posix.startswith(pattern + "/"):
+                matched = True
+        else:
+            # Component or filename match (matches any depth)
+            if pattern in parts or fnmatch.fnmatch(rel_path.name, pattern):
+                matched = True
+        if matched:
+            skip = not is_neg
+    return skip
+
+
+# ---------------------------------------------------------------------------
 # Section classification
 # ---------------------------------------------------------------------------
 
@@ -599,6 +647,18 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dic
         text = raw_bytes.decode("utf-8", errors="replace")
         fm_text, body = split_frontmatter(text)
         fm = parse_frontmatter_kv(fm_text) if fm_text else {}
+        # Frontmatter opt-out: `embed: false` skips this file. If it was previously
+        # indexed, delete the existing entry so it's removed from search results.
+        if str(fm.get("embed", "")).lower() in ("false", "no", "off", "0"):
+            if existing:
+                con.execute(
+                    "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?)",
+                    (existing["id"],),
+                )
+                con.execute("DELETE FROM files WHERE id=?", (existing["id"],))
+                con.commit()
+                return {"status": "deleted", "reason": "embed: false in frontmatter"}
+            return {"status": "skipped", "reason": "embed: false in frontmatter"}
         title = _first_h1(body) or abs_path.stem
         frontmatter_json = json.dumps(fm)
         date = extract_date(fm, rel_path)
@@ -774,7 +834,7 @@ def _release_lock() -> None:
 # ---------------------------------------------------------------------------
 
 def reconcile(con: sqlite3.Connection, vault_path: Path = None,
-              skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates"),
+              skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates", "Reference"),
               *, report_progress: bool = True) -> dict:
     """Walk the vault, add/update/delete/move as needed. Returns counts by status.
 
@@ -786,12 +846,18 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
     if report_progress and not _acquire_lock():
         raise RuntimeError("Another indexing run is in progress (lock file exists)")
 
+    # Load .embedignore from vault root (overrides scan even if vault_path is a subdir)
+    ignore_patterns = load_ignore_patterns(VAULT_DIR)
+
     # First pass: enumerate files so we know the total for progress
     files_to_scan: list[Path] = []
     for abs_path in vault_path.rglob("*"):
         if not abs_path.is_file():
             continue
         if any(skip in abs_path.parts for skip in skip_dirs):
+            continue
+        rel = abs_path.relative_to(VAULT_DIR)
+        if matches_ignore(rel, ignore_patterns):
             continue
         if abs_path.suffix.lower() not in (".md", ".markdown", ".pdf", ".html", ".htm", ".txt"):
             continue
