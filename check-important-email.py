@@ -10,10 +10,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from config import LOCATION_FILE
 
+# Configure email accounts via environment variables:
+#   MEMENTO_EMAIL_ACCOUNTS=user@example.com:--client mail,user@gmail.com:
+_raw = os.environ.get("MEMENTO_EMAIL_ACCOUNTS", "")
 ACCOUNTS = [
-    ("steven@stevenkasapi.net", "--client mail"),
-    ("steven.j.kasapi@gmail.com", "")
-]
+    (parts[0], parts[1] if len(parts) > 1 else "")
+    for entry in _raw.split(",")
+    if entry.strip()
+    for parts in [entry.strip().split(":", 1)]
+] if _raw else []
 
 def get_location():
     """Read current location from LOCATION.md."""

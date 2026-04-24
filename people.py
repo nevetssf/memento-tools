@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-people.py — People & relationship manager for steven.db
+people.py — People & relationship manager for people.db
 
 Usage: python3 people.py <command> [args]
 
@@ -1380,7 +1380,7 @@ def cmd_links(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="people.py",
-        description="People & relationship manager for steven.db"
+        description="People & relationship manager for people.db"
     )
     # Shared parent parser for flags inherited by all subcommands
     shared = argparse.ArgumentParser(add_help=False)

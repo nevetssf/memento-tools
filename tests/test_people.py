@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import people as P
 
 # ---------------------------------------------------------------------------
-# Schema — mirrors steven.db exactly
+# Schema — mirrors people.db exactly
 # ---------------------------------------------------------------------------
 
 SCHEMA = """
