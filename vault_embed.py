@@ -613,7 +613,8 @@ def _first_h1(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dict:
+def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path,
+               *, extract_metadata_now: bool = True) -> dict:
     """Index a single file. Returns {'status': 'new|updated|moved|unchanged|skipped', 'chunks': N}."""
     rel_path = abs_path.relative_to(vault_path)
     ext = abs_path.suffix.lower().lstrip(".")
@@ -753,15 +754,20 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dic
     if fm_shortcut is not None:
         # All chunks in this file share the same frontmatter-derived metadata
         metas = [fm_shortcut] * len(distilled)
-    else:
+    elif extract_metadata_now:
         metas = extract_metadata_batch(texts_to_embed)
+    else:
+        # Phase 1: skip LLM metadata extraction; store NULL so a later
+        # enrich_metadata pass can fill these in.
+        metas = [None] * len(distilled)
 
     # --- Insert chunks + embeddings ---
     for idx, ((heading, content, page_num), vector, meta) in enumerate(zip(distilled, vectors, metas)):
+        meta_json = json.dumps(meta) if meta is not None else None
         cur = con.execute(
             """INSERT INTO chunks (file_id, chunk_index, heading, content, token_count, page_num, metadata)
                VALUES (?,?,?,?,?,?,?)""",
-            (file_id, idx, heading, content, count_tokens(content), page_num, json.dumps(meta)),
+            (file_id, idx, heading, content, count_tokens(content), page_num, meta_json),
         )
         chunk_id = cur.lastrowid
         con.execute(
@@ -846,7 +852,8 @@ ALL_EXTS = TEXT_EXTS | PDF_EXTS
 
 def reconcile(con: sqlite3.Connection, vault_path: Path = None,
               skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates", "Reference"),
-              *, report_progress: bool = True, file_filter: str = "all") -> dict:
+              *, report_progress: bool = True, file_filter: str = "all",
+              extract_metadata_now: bool = True) -> dict:
     """Walk the vault, add/update/delete/move as needed. Returns counts by status.
 
     file_filter:
@@ -939,7 +946,8 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
                 # Truncate long paths for the bar
                 pbar.set_description_str(f"Indexing {rel[-60:]}")
             try:
-                result = index_file(con, vault_path, abs_path)
+                result = index_file(con, vault_path, abs_path,
+                                    extract_metadata_now=extract_metadata_now)
                 counts[result["status"]] = counts.get(result["status"], 0) + 1
             except Exception as e:
                 counts["error"] += 1
@@ -1113,6 +1121,79 @@ def semantic_search(con: sqlite3.Connection, query: str, *,
     return results
 
 
+def enrich_metadata(con: sqlite3.Connection, *, batch_size: int = 8,
+                    limit: int | None = None) -> dict:
+    """Process chunks with NULL metadata via batched LLM extraction.
+
+    Use after a fast `--no-metadata` indexing pass to backfill the
+    metadata column without re-embedding.
+
+    Returns counts: processed, errors, remaining.
+    """
+    rows = con.execute(
+        "SELECT id, content FROM chunks WHERE metadata IS NULL ORDER BY id"
+    ).fetchall()
+    total = len(rows)
+    if limit is not None:
+        rows = rows[:limit]
+
+    if not rows:
+        return {"processed": 0, "errors": 0, "remaining": 0, "total_pending": 0}
+
+    # Progress bar in TTY mode
+    pbar = None
+    if sys.stdout.isatty():
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(total=len(rows), unit="chunk", desc="Enriching metadata")
+        except ImportError:
+            pass
+
+    processed = 0
+    errors = 0
+
+    # Lock so concurrent runs don't double-process the same rows
+    if not _acquire_lock():
+        if pbar is not None:
+            pbar.close()
+        raise RuntimeError("Another indexing run is in progress (lock file exists)")
+
+    try:
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            texts = [r["content"] for r in batch]
+            try:
+                metas = extract_metadata_batch(texts, max_batch_size=batch_size)
+            except Exception as e:
+                # Mark as errored — store empty metadata so we don't retry on same content
+                metas = [dict(EMPTY_METADATA, _enrich_error=str(e)) for _ in batch]
+                errors += len(batch)
+
+            for r, m in zip(batch, metas):
+                con.execute(
+                    "UPDATE chunks SET metadata=? WHERE id=?",
+                    (json.dumps(m), r["id"]),
+                )
+                processed += 1
+                if pbar is not None:
+                    pbar.update(1)
+            con.commit()
+    finally:
+        if pbar is not None:
+            pbar.close()
+        _release_lock()
+
+    remaining = con.execute(
+        "SELECT COUNT(*) FROM chunks WHERE metadata IS NULL"
+    ).fetchone()[0]
+    return {
+        "processed": processed,
+        "errors": errors,
+        "remaining": remaining,
+        "total_pending": total,
+    }
+
+
 def index_stats(con: sqlite3.Connection) -> dict:
     files = con.execute("SELECT COUNT(*) FROM files").fetchone()[0]
     chunks = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
@@ -1120,6 +1201,9 @@ def index_stats(con: sqlite3.Connection) -> dict:
     by_section = dict(con.execute("SELECT section, COUNT(*) FROM files GROUP BY section").fetchall())
     last_indexed = con.execute("SELECT MAX(indexed_at) FROM files").fetchone()[0]
     db_size = EMBED_DB_PATH.stat().st_size if EMBED_DB_PATH.exists() else 0
+    chunks_pending_metadata = con.execute(
+        "SELECT COUNT(*) FROM chunks WHERE metadata IS NULL"
+    ).fetchone()[0]
     return {
         "files": files,
         "chunks": chunks,
@@ -1129,6 +1213,7 @@ def index_stats(con: sqlite3.Connection) -> dict:
         "db_size_mb": round(db_size / 1024 / 1024, 1),
         "embed_model": EMBED_MODEL_NAME,
         "embed_dims": EMBED_DIMS,
+        "chunks_pending_metadata": chunks_pending_metadata,
     }
 
 
@@ -1139,8 +1224,17 @@ def index_stats(con: sqlite3.Connection) -> dict:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--reconcile", action="store_true", help="Run full vault reconciliation")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--reconcile", action="store_true",
+                      help="Run vault reconciliation (chunk + embed; metadata extraction unless --no-metadata)")
+    mode.add_argument("--enrich-metadata", action="store_true",
+                      help="Extract LLM metadata for chunks where it's still NULL (fills in after a --no-metadata pass)")
     parser.add_argument("--path", help="Subpath under vault to scan (default: full vault)")
+    parser.add_argument("--no-metadata", action="store_true",
+                        help="Phase 1 only: skip LLM metadata extraction; vector search still works. Run --enrich-metadata later.")
+    parser.add_argument("--limit", type=int, help="--enrich-metadata: max chunks to process this run")
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="--enrich-metadata: chunks per LLM call (default: 8)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--text-only", action="store_true",
                        help="Only index .md/.html/.txt; skip PDFs (and don't orphan-delete PDFs)")
@@ -1148,13 +1242,23 @@ if __name__ == "__main__":
                        help="Only index .pdf; skip text files (and don't orphan-delete text files)")
     args = parser.parse_args()
 
+    con = connect()
+
     if args.reconcile:
         scope = VAULT_DIR / args.path if args.path else VAULT_DIR
         file_filter = "text" if args.text_only else ("pdf" if args.pdf_only else "all")
-        con = connect()
         try:
-            counts = reconcile(con, scope, file_filter=file_filter)
-            print(json.dumps({"ok": True, "counts": counts, "filter": file_filter}))
+            counts = reconcile(con, scope, file_filter=file_filter,
+                               extract_metadata_now=not args.no_metadata)
+            print(json.dumps({"ok": True, "counts": counts, "filter": file_filter,
+                              "metadata_extracted": not args.no_metadata}))
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)
+            sys.exit(1)
+    elif args.enrich_metadata:
+        try:
+            r = enrich_metadata(con, batch_size=args.batch_size, limit=args.limit)
+            print(json.dumps({"ok": True, **r}))
         except Exception as e:
             print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)
             sys.exit(1)

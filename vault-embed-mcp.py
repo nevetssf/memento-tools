@@ -49,10 +49,30 @@ async def list_tools() -> list[types.Tool]:
                         "enum": ["all", "text", "pdf"],
                         "description": "What to index: 'all' (default; text files first then PDFs), 'text' (.md/.html/.txt only), 'pdf' (PDFs only). When filtered, orphan deletion only applies within that file type."
                     },
+                    "extract_metadata": {
+                        "type": "boolean",
+                        "description": "When true (default), extract LLM metadata (people/topics/etc.) per chunk during indexing. Set false for a fast embedding-only pass; run enrich_metadata later to backfill."
+                    },
                     "background": {
                         "type": "boolean",
                         "description": "Run in background (default: false). When true, returns immediately; poll index_progress to track."
                     }
+                }
+            },
+        ),
+        types.Tool(
+            name="enrich_metadata",
+            description=(
+                "Backfill LLM-extracted metadata (people, topics, action_items, dates) "
+                "for any chunks where metadata is still NULL. Use after a fast embedding-only "
+                "indexing pass (index_vault with extract_metadata=false). Idempotent and resumable."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max chunks to process this run (default: all pending)"},
+                    "batch_size": {"type": "integer", "description": "Chunks per LLM call (default: 8)"},
+                    "background": {"type": "boolean", "description": "Run in background and poll index_progress for status"}
                 }
             },
         ),
@@ -137,6 +157,7 @@ def _dispatch(name: str, args: dict) -> str:
         file_filter = args.get("filter", "all")
         if file_filter not in ("all", "text", "pdf"):
             return json.dumps({"error": f"Invalid filter: {file_filter}"})
+        extract_meta = args.get("extract_metadata", True)
 
         if args.get("background"):
             # Spawn detached subprocess
@@ -148,6 +169,8 @@ def _dispatch(name: str, args: dict) -> str:
                 cmd.append("--text-only")
             elif file_filter == "pdf":
                 cmd.append("--pdf-only")
+            if not extract_meta:
+                cmd.append("--no-metadata")
             log = Path(str(ve.EMBED_DB_PATH.parent / "index.log"))
             log.parent.mkdir(parents=True, exist_ok=True)
             with open(log, "a") as f:
@@ -161,16 +184,43 @@ def _dispatch(name: str, args: dict) -> str:
                 "pid": proc.pid,
                 "scope": str(vault_path),
                 "filter": file_filter,
+                "extract_metadata": extract_meta,
                 "note": "Poll index_progress to check status.",
             })
 
         # Synchronous
         if subpath:
-            counts = _reconcile_subdir(con, vault_path, file_filter=file_filter)
+            counts = _reconcile_subdir(con, vault_path, file_filter=file_filter,
+                                       extract_metadata_now=extract_meta)
         else:
-            counts = ve.reconcile(con, VAULT_DIR, file_filter=file_filter)
+            counts = ve.reconcile(con, VAULT_DIR, file_filter=file_filter,
+                                  extract_metadata_now=extract_meta)
         return json.dumps({"ok": True, "background": False, "counts": counts,
-                           "path": str(vault_path), "filter": file_filter})
+                           "path": str(vault_path), "filter": file_filter,
+                           "extract_metadata": extract_meta})
+
+    if name == "enrich_metadata":
+        existing = ve.read_progress()
+        if existing and existing.get("status") == "running":
+            return json.dumps({"ok": False, "error": "An indexing run is already in progress",
+                               "progress": existing})
+
+        if args.get("background"):
+            script = Path(__file__).parent / "vault_embed.py"
+            cmd = [sys.executable, str(script), "--enrich-metadata"]
+            if args.get("limit"):
+                cmd += ["--limit", str(args["limit"])]
+            if args.get("batch_size"):
+                cmd += ["--batch-size", str(args["batch_size"])]
+            log = Path(str(ve.EMBED_DB_PATH.parent / "index.log"))
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "a") as f:
+                proc = subprocess.Popen(cmd, stdout=f, stderr=f, start_new_session=True)
+            return json.dumps({"ok": True, "background": True, "pid": proc.pid})
+
+        r = ve.enrich_metadata(con, batch_size=args.get("batch_size", 8),
+                               limit=args.get("limit"))
+        return json.dumps({"ok": True, "background": False, **r})
 
     if name == "index_progress":
         state = ve.read_progress()
@@ -208,9 +258,11 @@ def _dispatch(name: str, args: dict) -> str:
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
-def _reconcile_subdir(con, subdir_path: Path, file_filter: str = "all") -> dict:
+def _reconcile_subdir(con, subdir_path: Path, file_filter: str = "all",
+                      extract_metadata_now: bool = True) -> dict:
     """Reconcile a subdirectory with progress reporting; does NOT delete orphans outside the subdir."""
-    return ve.reconcile(con, subdir_path, file_filter=file_filter)
+    return ve.reconcile(con, subdir_path, file_filter=file_filter,
+                        extract_metadata_now=extract_metadata_now)
 
 
 async def main():
