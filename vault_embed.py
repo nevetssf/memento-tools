@@ -833,15 +833,32 @@ def _release_lock() -> None:
 # Full vault reconciliation
 # ---------------------------------------------------------------------------
 
+TEXT_EXTS = {".md", ".markdown", ".html", ".htm", ".txt"}
+PDF_EXTS = {".pdf"}
+ALL_EXTS = TEXT_EXTS | PDF_EXTS
+
+
 def reconcile(con: sqlite3.Connection, vault_path: Path = None,
               skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates", "Reference"),
-              *, report_progress: bool = True) -> dict:
+              *, report_progress: bool = True, file_filter: str = "all") -> dict:
     """Walk the vault, add/update/delete/move as needed. Returns counts by status.
+
+    file_filter:
+      - 'all' (default): index everything; text files first, PDFs last
+      - 'text': only .md/.markdown/.html/.htm/.txt; orphan-delete only text files
+      - 'pdf': only .pdf; orphan-delete only PDFs
 
     Writes progress to PROGRESS_FILE every file so callers can poll the state.
     Refuses to run if another indexing process holds the lock.
     """
     vault_path = vault_path or VAULT_DIR
+
+    if file_filter == "text":
+        accept_exts = TEXT_EXTS
+    elif file_filter == "pdf":
+        accept_exts = PDF_EXTS
+    else:
+        accept_exts = ALL_EXTS
 
     if report_progress and not _acquire_lock():
         raise RuntimeError("Another indexing run is in progress (lock file exists)")
@@ -859,9 +876,12 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
         rel = abs_path.relative_to(VAULT_DIR)
         if matches_ignore(rel, ignore_patterns):
             continue
-        if abs_path.suffix.lower() not in (".md", ".markdown", ".pdf", ".html", ".htm", ".txt"):
+        if abs_path.suffix.lower() not in accept_exts:
             continue
         files_to_scan.append(abs_path)
+
+    # Sort: text files first, PDFs last (so user gets text searchable while PDFs run)
+    files_to_scan.sort(key=lambda p: (1 if p.suffix.lower() in PDF_EXTS else 0, str(p)))
 
     counts = {"new": 0, "updated": 0, "unchanged": 0, "moved": 0, "deleted": 0, "skipped": 0, "error": 0}
     seen_paths: set[str] = set()
@@ -933,10 +953,21 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             pbar.close()
             pbar = None
 
-        # Delete orphans — files in DB but no longer in vault (only when scanning whole vault)
+        # Delete orphans — files in DB but no longer in vault (only when scanning whole vault).
+        # When file_filter is 'text' or 'pdf', only consider orphans of that type
+        # (so a --text-only run doesn't delete PDFs that simply weren't scanned this pass).
         if vault_path == VAULT_DIR:
             emit_progress(processed_files=len(files_to_scan), phase="deleting_orphans")
-            rows = con.execute("SELECT id, path FROM files").fetchall()
+            if file_filter == "text":
+                rows = con.execute(
+                    "SELECT id, path FROM files WHERE file_type IN ('md','html','txt')"
+                ).fetchall()
+            elif file_filter == "pdf":
+                rows = con.execute(
+                    "SELECT id, path FROM files WHERE file_type = 'pdf'"
+                ).fetchall()
+            else:
+                rows = con.execute("SELECT id, path FROM files").fetchall()
             orphans = [r for r in rows if r["path"] not in seen_paths]
             if sys.stdout.isatty() and orphans:
                 from tqdm import tqdm
@@ -1104,14 +1135,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--reconcile", action="store_true", help="Run full vault reconciliation")
     parser.add_argument("--path", help="Subpath under vault to scan (default: full vault)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--text-only", action="store_true",
+                       help="Only index .md/.html/.txt; skip PDFs (and don't orphan-delete PDFs)")
+    group.add_argument("--pdf-only", action="store_true",
+                       help="Only index .pdf; skip text files (and don't orphan-delete text files)")
     args = parser.parse_args()
 
     if args.reconcile:
         scope = VAULT_DIR / args.path if args.path else VAULT_DIR
+        file_filter = "text" if args.text_only else ("pdf" if args.pdf_only else "all")
         con = connect()
         try:
-            counts = reconcile(con, scope)
-            print(json.dumps({"ok": True, "counts": counts}))
+            counts = reconcile(con, scope, file_filter=file_filter)
+            print(json.dumps({"ok": True, "counts": counts, "filter": file_filter}))
         except Exception as e:
             print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)
             sys.exit(1)

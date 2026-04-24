@@ -44,6 +44,11 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "Optional subdirectory under the vault to limit the scan (e.g. 'Journal'). Defaults to the full vault."
                     },
+                    "filter": {
+                        "type": "string",
+                        "enum": ["all", "text", "pdf"],
+                        "description": "What to index: 'all' (default; text files first then PDFs), 'text' (.md/.html/.txt only), 'pdf' (PDFs only). When filtered, orphan deletion only applies within that file type."
+                    },
                     "background": {
                         "type": "boolean",
                         "description": "Run in background (default: false). When true, returns immediately; poll index_progress to track."
@@ -129,12 +134,20 @@ def _dispatch(name: str, args: dict) -> str:
         if existing and existing.get("status") == "running":
             return json.dumps({"ok": False, "error": "An indexing run is already in progress", "progress": existing})
 
+        file_filter = args.get("filter", "all")
+        if file_filter not in ("all", "text", "pdf"):
+            return json.dumps({"error": f"Invalid filter: {file_filter}"})
+
         if args.get("background"):
             # Spawn detached subprocess
             script = Path(__file__).parent / "vault_embed.py"
             cmd = [sys.executable, str(script), "--reconcile"]
             if subpath:
                 cmd += ["--path", subpath]
+            if file_filter == "text":
+                cmd.append("--text-only")
+            elif file_filter == "pdf":
+                cmd.append("--pdf-only")
             log = Path(str(ve.EMBED_DB_PATH.parent / "index.log"))
             log.parent.mkdir(parents=True, exist_ok=True)
             with open(log, "a") as f:
@@ -147,15 +160,17 @@ def _dispatch(name: str, args: dict) -> str:
                 "background": True,
                 "pid": proc.pid,
                 "scope": str(vault_path),
+                "filter": file_filter,
                 "note": "Poll index_progress to check status.",
             })
 
         # Synchronous
         if subpath:
-            counts = _reconcile_subdir(con, vault_path)
+            counts = _reconcile_subdir(con, vault_path, file_filter=file_filter)
         else:
-            counts = ve.reconcile(con, VAULT_DIR)
-        return json.dumps({"ok": True, "background": False, "counts": counts, "path": str(vault_path)})
+            counts = ve.reconcile(con, VAULT_DIR, file_filter=file_filter)
+        return json.dumps({"ok": True, "background": False, "counts": counts,
+                           "path": str(vault_path), "filter": file_filter})
 
     if name == "index_progress":
         state = ve.read_progress()
@@ -193,9 +208,9 @@ def _dispatch(name: str, args: dict) -> str:
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
-def _reconcile_subdir(con, subdir_path: Path) -> dict:
+def _reconcile_subdir(con, subdir_path: Path, file_filter: str = "all") -> dict:
     """Reconcile a subdirectory with progress reporting; does NOT delete orphans outside the subdir."""
-    return ve.reconcile(con, subdir_path)
+    return ve.reconcile(con, subdir_path, file_filter=file_filter)
 
 
 async def main():
