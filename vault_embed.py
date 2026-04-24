@@ -406,15 +406,110 @@ METADATA_SYSTEM = (
     "Use empty arrays for missing fields. Return only the JSON, no preamble."
 )
 
+EMPTY_METADATA = {"people": [], "topics": [], "action_items": [], "dates_mentioned": []}
+
+METADATA_BATCH_SYSTEM = (
+    "For each numbered note chunk below, extract structured metadata. "
+    "Return a JSON array (one object per chunk, in order) with keys: "
+    "people, topics, action_items, dates_mentioned. "
+    "Use empty arrays for missing fields. Return only the JSON array, no preamble or markdown fences."
+)
+
 
 def extract_metadata(chunk_text: str) -> dict:
     try:
         out = chat(chunk_text, system=METADATA_SYSTEM, temperature=0.0, max_tokens=300)
-        # Strip markdown fences if present
         out = re.sub(r"^```(?:json)?\n?|\n?```$", "", out.strip(), flags=re.MULTILINE)
         return json.loads(out)
     except Exception:
-        return {"people": [], "topics": [], "action_items": [], "dates_mentioned": []}
+        return dict(EMPTY_METADATA)
+
+
+def extract_metadata_batch(chunk_texts: list[str], max_batch_size: int = 8) -> list[dict]:
+    """Extract metadata for multiple chunks in one LLM call. Falls back to per-chunk on failure."""
+    if not chunk_texts:
+        return []
+    results: list[dict] = []
+    # Process in batches of max_batch_size
+    for i in range(0, len(chunk_texts), max_batch_size):
+        batch = chunk_texts[i:i + max_batch_size]
+        prompt = "\n\n".join(f"=== CHUNK {j + 1} ===\n{text}" for j, text in enumerate(batch))
+        try:
+            out = chat(prompt, system=METADATA_BATCH_SYSTEM, temperature=0.0,
+                       max_tokens=300 * len(batch))
+            out = re.sub(r"^```(?:json)?\n?|\n?```$", "", out.strip(), flags=re.MULTILINE)
+            parsed = json.loads(out)
+            if isinstance(parsed, list) and len(parsed) == len(batch):
+                results.extend(parsed)
+                continue
+        except Exception:
+            pass
+        # Fallback: one-by-one
+        for text in batch:
+            results.append(extract_metadata(text))
+    return results
+
+
+def metadata_from_frontmatter(fm: dict, section: str) -> dict | None:
+    """For files with rich frontmatter (journal, cellar, people), derive metadata
+    without an LLM call. Returns None if the section is not eligible for this shortcut."""
+    section = (section or "").lower()
+    if not section.startswith(("journal", "cellar/", "people")):
+        return None
+
+    # Normalize list fields
+    def as_list(v):
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return []
+
+    # People from frontmatter. Journal uses "people: [Name (id), ...]"; cellar/people use different keys.
+    people_raw = as_list(fm.get("people"))
+    people = [re.sub(r"\s*\(\d+\)\s*$", "", p).strip() for p in people_raw]
+
+    tags = as_list(fm.get("tags"))
+
+    # Dates
+    dates = []
+    for key in ("date", "date_tasted", "created"):
+        v = fm.get(key)
+        if isinstance(v, str) and re.match(r"^\d{4}-\d{2}-\d{2}", v):
+            dates.append(v[:10])
+
+    # Section-specific topic hints
+    topics = list(tags)  # tags become topics
+    if section.startswith("cellar/"):
+        # e.g. cellar/wine -> wine, whiskey, etc.
+        topics.append(section.split("/", 1)[1])
+        for key in ("vintner", "distillery", "shipper", "region", "country"):
+            v = fm.get(key)
+            if isinstance(v, str) and v.strip():
+                topics.append(v.strip())
+    elif section == "people":
+        # People notes: frontmatter may have name, role, location, etc.
+        for key in ("name", "role", "company", "location"):
+            v = fm.get(key)
+            if isinstance(v, str) and v.strip():
+                topics.append(v.strip())
+
+    # Dedupe topics preserving order
+    seen = set()
+    topics_unique = []
+    for t in topics:
+        if t and t not in seen:
+            seen.add(t)
+            topics_unique.append(t)
+
+    return {
+        "people": people,
+        "topics": topics_unique[:8],
+        "action_items": [],
+        "dates_mentioned": dates,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -583,9 +678,20 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path) -> dic
         con.rollback()
         return {"status": "error", "error": str(e), "path": str(rel_path)}
 
+    # --- Metadata: shortcut for structured files, batch LLM for the rest ---
+    if file_type == "md":
+        fm_shortcut = metadata_from_frontmatter(fm, section)
+    else:
+        fm_shortcut = None
+
+    if fm_shortcut is not None:
+        # All chunks in this file share the same frontmatter-derived metadata
+        metas = [fm_shortcut] * len(distilled)
+    else:
+        metas = extract_metadata_batch(texts_to_embed)
+
     # --- Insert chunks + embeddings ---
-    for idx, ((heading, content, page_num), vector) in enumerate(zip(distilled, vectors)):
-        meta = extract_metadata(content)
+    for idx, ((heading, content, page_num), vector, meta) in enumerate(zip(distilled, vectors, metas)):
         cur = con.execute(
             """INSERT INTO chunks (file_id, chunk_index, heading, content, token_count, page_num, metadata)
                VALUES (?,?,?,?,?,?,?)""",
