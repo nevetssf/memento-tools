@@ -188,16 +188,21 @@ def _dispatch(name: str, args: dict) -> str:
                 "note": "Poll index_progress to check status.",
             })
 
-        # Synchronous
+        # Synchronous: phase 1 (chunk + embed) then phase 2 (metadata) unless opted out.
         if subpath:
-            counts = _reconcile_subdir(con, vault_path, file_filter=file_filter,
-                                       extract_metadata_now=extract_meta)
+            counts1 = _reconcile_subdir(con, vault_path, file_filter=file_filter,
+                                        extract_metadata_now=False)
         else:
-            counts = ve.reconcile(con, VAULT_DIR, file_filter=file_filter,
-                                  extract_metadata_now=extract_meta)
-        return json.dumps({"ok": True, "background": False, "counts": counts,
-                           "path": str(vault_path), "filter": file_filter,
-                           "extract_metadata": extract_meta})
+            counts1 = ve.reconcile(con, VAULT_DIR, file_filter=file_filter,
+                                   extract_metadata_now=False)
+        out = {"ok": True, "background": False, "phase_1_counts": counts1,
+               "path": str(vault_path), "filter": file_filter,
+               "extract_metadata": extract_meta}
+        if extract_meta:
+            out["phase_2_counts"] = ve.enrich_metadata(con)
+        else:
+            out["note"] = "metadata enrichment skipped; call enrich_metadata later"
+        return json.dumps(out)
 
     if name == "enrich_metadata":
         existing = ve.read_progress()

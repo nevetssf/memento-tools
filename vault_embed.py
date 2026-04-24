@@ -1248,10 +1248,26 @@ if __name__ == "__main__":
         scope = VAULT_DIR / args.path if args.path else VAULT_DIR
         file_filter = "text" if args.text_only else ("pdf" if args.pdf_only else "all")
         try:
-            counts = reconcile(con, scope, file_filter=file_filter,
-                               extract_metadata_now=not args.no_metadata)
-            print(json.dumps({"ok": True, "counts": counts, "filter": file_filter,
-                              "metadata_extracted": not args.no_metadata}))
+            # Phase 1: chunk + embed (no LLM metadata yet — fast).
+            # Frontmatter shortcut still populates metadata for Journal/People/Cellar.
+            if sys.stdout.isatty():
+                print("Phase 1: chunk + embed (no metadata yet)…", file=sys.stderr)
+            counts1 = reconcile(con, scope, file_filter=file_filter,
+                                extract_metadata_now=False)
+
+            # Phase 2: backfill LLM metadata, unless --no-metadata was passed.
+            counts2 = None
+            if not args.no_metadata:
+                if sys.stdout.isatty():
+                    print("\nPhase 2: enrich metadata (LLM)…", file=sys.stderr)
+                counts2 = enrich_metadata(con, batch_size=args.batch_size, limit=args.limit)
+
+            out = {"ok": True, "phase_1_counts": counts1, "filter": file_filter}
+            if counts2 is not None:
+                out["phase_2_counts"] = counts2
+            else:
+                out["note"] = "metadata enrichment skipped (--no-metadata); run --enrich-metadata later"
+            print(json.dumps(out))
         except Exception as e:
             print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)
             sys.exit(1)
