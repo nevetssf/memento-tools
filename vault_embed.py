@@ -212,7 +212,12 @@ def load_ignore_patterns(vault_path: Path) -> list[tuple[str, bool]]:
 
 
 def matches_ignore(rel_path: Path, patterns: list[tuple[str, bool]]) -> bool:
-    """Test rel_path against patterns. Later patterns override earlier."""
+    """Test rel_path against patterns. Later patterns override earlier.
+
+    Pattern semantics:
+      - Pattern containing '/' — path-style glob or prefix match against the full posix path
+      - Pattern without '/' — glob-matched against EVERY path component (matches dirs at any depth)
+    """
     import fnmatch
     skip = False
     parts = rel_path.parts
@@ -224,8 +229,9 @@ def matches_ignore(rel_path: Path, patterns: list[tuple[str, bool]]) -> bool:
             if fnmatch.fnmatch(posix, pattern) or posix.startswith(pattern + "/"):
                 matched = True
         else:
-            # Component or filename match (matches any depth)
-            if pattern in parts or fnmatch.fnmatch(rel_path.name, pattern):
+            # Glob-match against every path component (so patterns like 'Reference*'
+            # catch 'Reference/...' and 'Reference (no indexing)/...' anywhere).
+            if any(fnmatch.fnmatch(part, pattern) for part in parts):
                 matched = True
         if matched:
             skip = not is_neg
