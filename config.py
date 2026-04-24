@@ -66,3 +66,9 @@ CHAT_MODEL_NAME = os.environ.get("MEMENTO_CHAT_MODEL_NAME", "qwen3.6-35b-a3b@q8_
 
 # Todoist API token — get yours at https://todoist.com/app/settings/integrations/developer
 TODOIST_TOKEN = os.environ.get("MEMENTO_TODOIST_TOKEN", "")
+
+# Anthropic API — used by pdf2md.py --backend claude.
+# Optional: set ANTHROPIC_API_KEY in your shell, or MEMENTO_ANTHROPIC_API_KEY for an
+# isolated key. The default model is Haiku 4.5 (cheap, very good for OCR/extraction).
+ANTHROPIC_API_KEY = os.environ.get("MEMENTO_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("MEMENTO_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")

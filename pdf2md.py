@@ -26,10 +26,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import VAULT_DIR, CHAT_MODEL_URL
+from config import VAULT_DIR, CHAT_MODEL_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 
 VISION_MODEL_NAME = "qwen2-vl-7b-instruct"
 TEXT_THRESHOLD_CHARS = 100   # PDFs with less text per page than this trigger fallback
+
+CLAUDE_PROMPT = (
+    "Extract the full text content of this PDF as clean Markdown. Preserve heading "
+    "structure (use #, ##, ### for sections), lists, tables, blockquotes, and emphasis. "
+    "If a page contains a figure or image, include a brief italic placeholder like "
+    "*[figure: brief description]*. Do not summarize or omit content. "
+    "Output only the markdown, no preamble or commentary."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +137,65 @@ def is_text_sparse(text: str, page_count: int) -> bool:
     return len(text.strip()) < (max(page_count, 1) * TEXT_THRESHOLD_CHARS)
 
 
+def extract_claude(pdf_path: Path) -> tuple[str, dict]:
+    """Extract via Anthropic Claude API. Native PDF support — no rendering needed."""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set in environment")
+
+    # Pull metadata + page count from pymupdf (we still want them in frontmatter)
+    import fitz
+    doc = fitz.open(str(pdf_path))
+    meta = {k: v for k, v in (doc.metadata or {}).items() if v}
+    meta["page_count"] = doc.page_count
+    doc.close()
+
+    # Anthropic limits PDFs to 32MB after base64. Refuse larger files explicitly.
+    pdf_bytes = pdf_path.read_bytes()
+    raw_size = len(pdf_bytes)
+    if raw_size > 30 * 1024 * 1024:  # ~30MB raw → ~40MB base64, over limit
+        raise RuntimeError(f"PDF too large for Claude API ({raw_size / 1024 / 1024:.1f} MB; limit ~30MB)")
+
+    pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
+
+    body = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 8192,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_b64,
+                    },
+                },
+                {"type": "text", "text": CLAUDE_PROMPT},
+            ],
+        }],
+    }
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    # Concatenate any text blocks in the response
+    parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+    text = "\n".join(parts).strip()
+    if not text:
+        raise RuntimeError(f"Claude returned no text content: {data}")
+    return text, meta
+
+
 # ---------------------------------------------------------------------------
 # MD assembly
 # ---------------------------------------------------------------------------
@@ -168,7 +235,8 @@ def build_md(source_pdf: Path, source_pdf_hash: str, content: str,
 # ---------------------------------------------------------------------------
 
 def convert_pdf(pdf_path: Path, *, force: bool = False,
-                vision_fallback: bool = True) -> dict:
+                vision_fallback: bool = True,
+                backend: str = "pymupdf4llm") -> dict:
     md_path = pdf_path.with_suffix(".md")
     current_hash = file_hash(pdf_path)
     prev_hash = stored_hash(md_path)
@@ -186,23 +254,31 @@ def convert_pdf(pdf_path: Path, *, force: bool = False,
             "warning": "PDF hash differs from MD's recorded hash; pass --force to overwrite.",
         }
 
-    # Extract via pymupdf4llm first
-    try:
-        text, pdf_meta = extract_pymupdf4llm(pdf_path)
-        method = "pymupdf4llm"
-    except Exception as e:
-        return {"status": "error", "path": str(pdf_path),
-                "error": f"pymupdf4llm: {type(e).__name__}: {e}"}
-
-    # Image-PDF fallback
-    if vision_fallback and is_text_sparse(text, pdf_meta.get("page_count", 1)):
+    if backend == "claude":
+        # Claude reads PDFs natively — no separate vision fallback needed
         try:
-            text2, meta2 = extract_vision(pdf_path)
-            text = text2
-            pdf_meta = {**pdf_meta, **meta2}
-            method = "qwen2-vl-7b-vision"
+            text, pdf_meta = extract_claude(pdf_path)
+            method = f"claude:{ANTHROPIC_MODEL}"
         except Exception as e:
-            method = f"pymupdf4llm-sparse (vision fallback failed: {e})"
+            return {"status": "error", "path": str(pdf_path),
+                    "error": f"claude: {type(e).__name__}: {e}"}
+    else:
+        # Default: pymupdf4llm with optional local vision fallback
+        try:
+            text, pdf_meta = extract_pymupdf4llm(pdf_path)
+            method = "pymupdf4llm"
+        except Exception as e:
+            return {"status": "error", "path": str(pdf_path),
+                    "error": f"pymupdf4llm: {type(e).__name__}: {e}"}
+
+        if vision_fallback and is_text_sparse(text, pdf_meta.get("page_count", 1)):
+            try:
+                text2, meta2 = extract_vision(pdf_path)
+                text = text2
+                pdf_meta = {**pdf_meta, **meta2}
+                method = "qwen2-vl-7b-vision"
+            except Exception as e:
+                method = f"pymupdf4llm-sparse (vision fallback failed: {e})"
 
     md_content = build_md(pdf_path, current_hash, text, pdf_meta, method)
     md_path.write_text(md_content)
@@ -228,6 +304,9 @@ def main():
                         help="Re-convert even if hash matches; overwrites existing MD")
     parser.add_argument("--no-vision-fallback", action="store_true",
                         help="Don't use vision OCR for image-based PDFs (extracts will be empty)")
+    parser.add_argument("--backend", choices=("pymupdf4llm", "claude"), default="pymupdf4llm",
+                        help="Extraction backend: 'pymupdf4llm' (default, local, free) or 'claude' "
+                             "(Anthropic API, native PDF support, higher quality, ~$0.003-0.01/page)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would happen without writing any MD")
     args = parser.parse_args()
@@ -269,7 +348,8 @@ def main():
                     r = {"status": "would-update (--force needed)", "path": str(pdf)}
             else:
                 r = convert_pdf(pdf, force=args.force,
-                                vision_fallback=not args.no_vision_fallback)
+                                vision_fallback=not args.no_vision_fallback,
+                                backend=args.backend)
             summary[r["status"]] = summary.get(r["status"], 0) + 1
             if not sys.stdout.isatty():
                 print(json.dumps(r))

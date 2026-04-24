@@ -184,19 +184,32 @@ file get deleted automatically.
 ## PDF → Markdown
 
 ```bash
-./.venv/bin/python3 pdf2md.py            # convert every PDF in the vault
-./.venv/bin/python3 pdf2md.py path.pdf   # specific files
-./.venv/bin/python3 pdf2md.py --force    # re-convert even if hash matches
-./.venv/bin/python3 pdf2md.py --dry-run  # preview
+./.venv/bin/python3 pdf2md.py                       # convert every PDF in the vault
+./.venv/bin/python3 pdf2md.py path.pdf               # specific files
+./.venv/bin/python3 pdf2md.py --force                # re-convert even if hash matches
+./.venv/bin/python3 pdf2md.py --dry-run              # preview
+./.venv/bin/python3 pdf2md.py --backend claude       # use Claude API (higher quality)
 ```
 
-- Uses [`pymupdf4llm`](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/) for fast
-  structure-preserving extraction (preserves headings, lists, tables)
-- Falls back to a vision LLM (default: `qwen2-vl-7b-instruct`) for image-only PDFs
-  (scans, photos of documents)
-- Writes a sidecar `Foo.md` next to `Foo.pdf` with frontmatter recording
-  `source_pdf_hash` so re-runs are idempotent
-- Refuses to overwrite existing `.md` unless `--force` is passed (your edits are safe)
+**Backends:**
+
+- **`pymupdf4llm`** (default) — local, fast, free. Uses
+  [`pymupdf4llm`](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/) for
+  structure-preserving extraction (headings, lists, tables). Falls back to a vision
+  LLM (default: `qwen2-vl-7b-instruct`) for image-only PDFs.
+- **`claude`** — Anthropic Claude API (default `claude-haiku-4-5-20251001`). Native
+  PDF support, no rendering step needed; handles text PDFs, scans, and complex
+  layouts uniformly. Requires `ANTHROPIC_API_KEY` (or `MEMENTO_ANTHROPIC_API_KEY`)
+  in the environment. Cost: ~$0.003-0.01/page with Haiku, more with Sonnet. Files
+  must be under ~30MB.
+
+The `conversion_method` field in each MD's frontmatter records which backend was
+used, so you can mix and match across the vault and always know which produced what.
+
+Both backends:
+- Write a sidecar `Foo.md` next to `Foo.pdf` with `source_pdf_hash` for idempotency
+- Refuse to overwrite existing `.md` without `--force` (your edits are safe)
+- Skip files where the hash matches the recorded one (no re-work)
 
 ## HTML → Markdown
 
