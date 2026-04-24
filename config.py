@@ -31,6 +31,9 @@ LOCATION_FILE = Path(os.environ.get("MEMENTO_LOCATION_FILE",
 SOUL_FILE = Path(os.environ.get("MEMENTO_SOUL_FILE",
     str(Path.home() / ".openclaw/workspace/SOUL.md")))
 
+# Obsidian templates directory
+TEMPLATES_DIR = Path(os.environ.get("MEMENTO_TEMPLATES_DIR", str(VAULT_DIR / "Templates")))
+
 # Cellar — wine and spirits collection (default: $VAULT_DIR/Cellar)
 CELLAR_DIR = Path(os.environ.get("MEMENTO_CELLAR_DIR", str(VAULT_DIR / "Cellar")))
 CELLAR_DIRS = {

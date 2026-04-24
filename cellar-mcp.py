@@ -18,53 +18,74 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import CELLAR_DIRS, LOCATION_FILE
+from config import CELLAR_DIRS, LOCATION_FILE, TEMPLATES_DIR
 from journal_fm import get_local_date
 
 app = Server("cellar-db")
 
 VALID_TYPES = list(CELLAR_DIRS.keys())  # wine, whiskey, gin, vodka
 
-# Frontmatter template per type
-def _fm(tag, producer, region, country, extra_field=None):
-    key = "vintner" if tag == "wine" else "distillery" if tag != "port" else "shipper"
-    loc = f"{region or ''}{', ' + country if country else ''}"
-    front = f"---\n{key}: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [{tag}]\n---\n\n# {producer}\n\n*{loc}*\n"
-    return front
+# ---------------------------------------------------------------------------
+# Template helpers
+# ---------------------------------------------------------------------------
 
-FM_TEMPLATES = {
-    "wine":    lambda p, r, c: _fm("wine", p, r, c),
-    "whiskey": lambda p, r, c: _fm("whiskey", p, r, c),
-    "gin":     lambda p, r, c: _fm("gin", p, r, c),
-    "vodka":   lambda p, r, c: _fm("vodka", p, r, c),
-    "tequila": lambda p, r, c: _fm("tequila", p, r or "Jalisco", c or "Mexico"),
-    "mezcal":  lambda p, r, c: _fm("mezcal", p, r or "Oaxaca", c or "Mexico"),
-    "rum":     lambda p, r, c: _fm("rum", p, r, c),
-    "port":    lambda p, r, c: _fm("port", p, r or "Douro", c or "Portugal"),
-}
+def _read_template(type_: str) -> str | None:
+    path = TEMPLATES_DIR / f"{type_.title()} Note.md"
+    return path.read_text() if path.exists() else None
 
-# Inline fields per type
-ENTRY_FIELDS = {
-    "wine":    ["varietal", "vintage", "alcohol", "price", "rating", "date_tasted", "in_cellar", "quantity", "would_buy_again"],
-    "whiskey": ["age", "abv", "cask", "price", "rating", "date_tasted", "in_collection", "quantity", "would_buy_again"],
-    "gin":     ["style", "abv", "botanicals", "price", "rating", "date_tasted", "would_buy_again", "best_serve"],
-    "vodka":   ["base", "abv", "filtration", "price", "rating", "date_tasted", "would_buy_again", "best_serve"],
-    "tequila": ["style", "agave", "abv", "price", "rating", "date_tasted", "would_buy_again"],
-    "mezcal":  ["agave", "abv", "process", "price", "rating", "date_tasted", "would_buy_again"],
-    "rum":     ["style", "age", "abv", "price", "rating", "date_tasted", "would_buy_again"],
-    "port":    ["style", "vintage", "age", "abv", "price", "rating", "date_tasted", "in_cellar", "quantity", "would_buy_again"],
-}
 
-BODY_SECTIONS = {
-    "wine":    ["Appearance", "Nose", "Palate", "Finish", "Food pairings", "Notes"],
-    "whiskey": ["Color", "Nose", "Palate", "Finish", "With water", "Notes"],
-    "gin":     ["Nose", "Palate", "Finish", "Notes"],
-    "vodka":   ["Nose", "Palate", "Finish", "Notes"],
-    "tequila": ["Nose", "Palate", "Finish", "Notes"],
-    "mezcal":  ["Color", "Nose", "Palate", "Finish", "Notes"],
-    "rum":     ["Color", "Nose", "Palate", "Finish", "Notes"],
-    "port":    ["Color", "Nose", "Palate", "Finish", "Food pairings", "Notes"],
-}
+def _fill(template: str, values: dict) -> str:
+    """Replace {{key}} placeholders; remove any that remain unfilled."""
+    for key, val in values.items():
+        template = template.replace(f"{{{{{key}}}}}", str(val) if val else "")
+    return re.sub(r"\{\{[^}]+\}\}", "", template)
+
+
+def _fill_inline_fields(section: str, fields: dict) -> str:
+    """Fill blank inline fields (key:: ) with provided values."""
+    for field, val in fields.items():
+        if val is not None and str(val) != "":
+            section = re.sub(
+                rf"^{re.escape(field)}::[ \t]*$",
+                f"{field}:: {val}",
+                section,
+                flags=re.MULTILINE,
+            )
+    return section
+
+
+def producer_content(type_: str, producer: str, region: str, country: str) -> str:
+    """Build producer file content from template."""
+    loc = f"{region}{', ' + country if country else ''}" if region else country or ""
+    values = {"producer": producer, "region": region or "", "country": country or "", "location": loc}
+    tmpl = _read_template(type_)
+    if tmpl:
+        # Take everything up to (but not including) the first body --- divider
+        parts = tmpl.split("\n---\n")
+        producer_tmpl = parts[0] + "\n---\n" + parts[1] if len(parts) >= 2 else tmpl
+        return _fill(producer_tmpl, values).rstrip() + "\n"
+    # Fallback if template missing
+    key = "vintner" if type_ == "wine" else "shipper" if type_ == "port" else "distillery"
+    return f"---\n{key}: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [{type_}]\n---\n\n# {producer}\n\n*{loc}*\n"
+
+
+def entry_content(type_: str, name: str, fields: dict) -> str:
+    """Build a bottle entry section from template."""
+    tmpl = _read_template(type_)
+    if tmpl:
+        parts = tmpl.split("\n---\n")
+        # Entry section is the third part (index 2)
+        entry_tmpl = parts[2] if len(parts) >= 3 else ""
+        if entry_tmpl:
+            filled = _fill(entry_tmpl, {"name": name})
+            return _fill_inline_fields(filled, fields)
+    # Fallback: build from known fields
+    lines = [f"\n## {name}\n"]
+    for field, val in fields.items():
+        if field not in ("type", "producer", "name", "region", "country"):
+            lines.append(f"{field}:: {val if val is not None else ''}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -73,20 +94,6 @@ BODY_SECTIONS = {
 
 def producer_path(type: str, producer: str) -> Path:
     return CELLAR_DIRS[type] / f"{producer}.md"
-
-
-def build_entry(name: str, type: str, fields: dict) -> str:
-    """Build a new bottle entry section."""
-    lines = [f"\n## {name}\n"]
-    for field in ENTRY_FIELDS[type]:
-        val = fields.get(field, "")
-        lines.append(f"{field}:: {val}")
-    lines.append("")
-    for section in BODY_SECTIONS[type]:
-        lines.append(f"**{section}:** ")
-        lines.append("")
-    lines.append("")
-    return "\n".join(lines)
 
 
 def find_entry_bounds(text: str, name: str) -> tuple[int, int] | None:
@@ -308,8 +315,7 @@ def _dispatch(name: str, args: dict) -> str:
         if path.exists():
             return json.dumps({"ok": False, "message": f"Producer '{producer}' already exists", "file": str(path)})
         path.parent.mkdir(parents=True, exist_ok=True)
-        header = FM_TEMPLATES[type_](producer, args.get("region", ""), args.get("country", ""))
-        path.write_text(header)
+        path.write_text(producer_content(type_, producer, args.get("region", ""), args.get("country", "")))
         return json.dumps({"ok": True, "file": str(path), "producer": producer, "type": type_})
 
     if name == "add_bottle":
@@ -322,10 +328,9 @@ def _dispatch(name: str, args: dict) -> str:
 
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            header = FM_TEMPLATES[type_](producer, args.get("region", ""), args.get("country", ""))
-            path.write_text(header)
+            path.write_text(producer_content(type_, producer, args.get("region", ""), args.get("country", "")))
 
-        entry = build_entry(bottle_name, type_, args)
+        entry = entry_content(type_, bottle_name, args)
         text = path.read_text()
         path.write_text(text.rstrip() + "\n\n---\n" + entry + "---\n")
         return json.dumps({"ok": True, "file": str(path), "producer": producer, "name": bottle_name})
