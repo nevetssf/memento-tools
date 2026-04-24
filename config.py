@@ -31,6 +31,15 @@ LOCATION_FILE = Path(os.environ.get("MEMENTO_LOCATION_FILE",
 SOUL_FILE = Path(os.environ.get("MEMENTO_SOUL_FILE",
     str(Path.home() / ".openclaw/workspace/SOUL.md")))
 
+# Cellar — wine and spirits collection (default: $VAULT_DIR/Cellar)
+CELLAR_DIR = Path(os.environ.get("MEMENTO_CELLAR_DIR", str(VAULT_DIR / "Cellar")))
+CELLAR_DIRS = {
+    "wine":    CELLAR_DIR / "Wines",
+    "whiskey": CELLAR_DIR / "Whiskeys",
+    "gin":     CELLAR_DIR / "Gin",
+    "vodka":   CELLAR_DIR / "Vodka",
+}
+
 # Signal target for notifications — set MEMENTO_SIGNAL_TARGET in your environment
 # e.g. export MEMENTO_SIGNAL_TARGET=uuid:your-signal-uuid
 SIGNAL_TARGET = os.environ.get("MEMENTO_SIGNAL_TARGET", "")
