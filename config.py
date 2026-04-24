@@ -38,6 +38,10 @@ CELLAR_DIRS = {
     "whiskey": CELLAR_DIR / "Whiskey",
     "gin":     CELLAR_DIR / "Gin",
     "vodka":   CELLAR_DIR / "Vodka",
+    "tequila": CELLAR_DIR / "Tequila",
+    "mezcal":  CELLAR_DIR / "Mezcal",
+    "rum":     CELLAR_DIR / "Rum",
+    "port":    CELLAR_DIR / "Port",
 }
 
 # Signal target for notifications — set MEMENTO_SIGNAL_TARGET in your environment

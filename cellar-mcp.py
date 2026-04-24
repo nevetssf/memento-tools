@@ -26,11 +26,21 @@ app = Server("cellar-db")
 VALID_TYPES = list(CELLAR_DIRS.keys())  # wine, whiskey, gin, vodka
 
 # Frontmatter template per type
+def _fm(tag, producer, region, country, extra_field=None):
+    key = "vintner" if tag == "wine" else "distillery" if tag != "port" else "shipper"
+    loc = f"{region or ''}{', ' + country if country else ''}"
+    front = f"---\n{key}: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [{tag}]\n---\n\n# {producer}\n\n*{loc}*\n"
+    return front
+
 FM_TEMPLATES = {
-    "wine":    lambda producer, region, country: f"---\nvintner: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [wine]\n---\n\n# {producer}\n\n*{region or ''}{', ' + country if country else ''}*\n",
-    "whiskey": lambda producer, region, country: f"---\ndistillery: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [whiskey]\n---\n\n# {producer}\n\n*{region or ''}{', ' + country if country else ''}*\n",
-    "gin":     lambda producer, region, country: f"---\ndistillery: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [gin]\n---\n\n# {producer}\n\n*{region or ''}{', ' + country if country else ''}*\n",
-    "vodka":   lambda producer, region, country: f"---\ndistillery: {producer}\ncountry: {country or ''}\ntags: [vodka]\n---\n\n# {producer}\n\n*{country or ''}*\n",
+    "wine":    lambda p, r, c: _fm("wine", p, r, c),
+    "whiskey": lambda p, r, c: _fm("whiskey", p, r, c),
+    "gin":     lambda p, r, c: _fm("gin", p, r, c),
+    "vodka":   lambda p, r, c: _fm("vodka", p, r, c),
+    "tequila": lambda p, r, c: _fm("tequila", p, r or "Jalisco", c or "Mexico"),
+    "mezcal":  lambda p, r, c: _fm("mezcal", p, r or "Oaxaca", c or "Mexico"),
+    "rum":     lambda p, r, c: _fm("rum", p, r, c),
+    "port":    lambda p, r, c: _fm("port", p, r or "Douro", c or "Portugal"),
 }
 
 # Inline fields per type
@@ -39,6 +49,10 @@ ENTRY_FIELDS = {
     "whiskey": ["age", "abv", "cask", "price", "rating", "date_tasted", "in_collection", "quantity", "would_buy_again"],
     "gin":     ["style", "abv", "botanicals", "price", "rating", "date_tasted", "would_buy_again", "best_serve"],
     "vodka":   ["base", "abv", "filtration", "price", "rating", "date_tasted", "would_buy_again", "best_serve"],
+    "tequila": ["style", "agave", "abv", "price", "rating", "date_tasted", "would_buy_again"],
+    "mezcal":  ["agave", "abv", "process", "price", "rating", "date_tasted", "would_buy_again"],
+    "rum":     ["style", "age", "abv", "price", "rating", "date_tasted", "would_buy_again"],
+    "port":    ["style", "vintage", "age", "abv", "price", "rating", "date_tasted", "in_cellar", "quantity", "would_buy_again"],
 }
 
 BODY_SECTIONS = {
@@ -46,6 +60,10 @@ BODY_SECTIONS = {
     "whiskey": ["Color", "Nose", "Palate", "Finish", "With water", "Notes"],
     "gin":     ["Nose", "Palate", "Finish", "Notes"],
     "vodka":   ["Nose", "Palate", "Finish", "Notes"],
+    "tequila": ["Nose", "Palate", "Finish", "Notes"],
+    "mezcal":  ["Color", "Nose", "Palate", "Finish", "Notes"],
+    "rum":     ["Color", "Nose", "Palate", "Finish", "Notes"],
+    "port":    ["Color", "Nose", "Palate", "Finish", "Food pairings", "Notes"],
 }
 
 
