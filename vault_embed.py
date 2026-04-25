@@ -1256,11 +1256,23 @@ if __name__ == "__main__":
                                 extract_metadata_now=False)
 
             # Phase 2: backfill LLM metadata, unless --no-metadata was passed.
+            # Skip silently if nothing is pending — common case on re-runs.
             counts2 = None
             if not args.no_metadata:
-                if sys.stdout.isatty():
-                    print("\nPhase 2: enrich metadata (LLM)…", file=sys.stderr)
-                counts2 = enrich_metadata(con, batch_size=args.batch_size, limit=args.limit)
+                pending = con.execute(
+                    "SELECT COUNT(*) FROM chunks WHERE metadata IS NULL"
+                ).fetchone()[0]
+                if pending > 0:
+                    if sys.stdout.isatty():
+                        print(f"\nPhase 2: enrich metadata for {pending} chunks…",
+                              file=sys.stderr)
+                    counts2 = enrich_metadata(con, batch_size=args.batch_size,
+                                              limit=args.limit)
+                else:
+                    if sys.stdout.isatty():
+                        print("\nPhase 2: nothing to enrich.", file=sys.stderr)
+                    counts2 = {"processed": 0, "errors": 0, "remaining": 0,
+                               "total_pending": 0}
 
             out = {"ok": True, "phase_1_counts": counts1, "filter": file_filter}
             if counts2 is not None:
