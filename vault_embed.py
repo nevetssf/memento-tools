@@ -25,7 +25,7 @@ import sqlite_vec
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     VAULT_DIR, EMBED_DB_PATH, EMBED_MODEL_URL, EMBED_MODEL_NAME, EMBED_DIMS,
-    CHAT_MODEL_URL, CHAT_MODEL_NAME,
+    CHAT_MODEL_URL, CHAT_MODEL_NAME, CHAT_MODEL_API_KEY,
 )
 from journal_fm import split_frontmatter
 
@@ -126,11 +126,14 @@ def connect():
 # LM Studio HTTP clients
 # ---------------------------------------------------------------------------
 
-def _post_json(url: str, body: dict, timeout: int = 120) -> dict:
+def _post_json(url: str, body: dict, timeout: int = 120, api_key: str = "") -> dict:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -156,7 +159,12 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
 
 def chat(prompt: str, system: str = "", temperature: float = 0.3, max_tokens: int = 500) -> str:
-    """Call the chat model. Returns just the text response."""
+    """Call the chat model. Returns just the text response.
+
+    Adds `chat_template_kwargs.enable_thinking=false` so Qwen3.x thinking
+    models don't burn CoT tokens on metadata extraction. LM Studio ignores
+    the unknown field; vLLM honors it.
+    """
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -168,8 +176,10 @@ def chat(prompt: str, system: str = "", temperature: float = 0.3, max_tokens: in
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "chat_template_kwargs": {"enable_thinking": False},
         },
         timeout=300,
+        api_key=CHAT_MODEL_API_KEY,
     )
     return data["choices"][0]["message"]["content"].strip()
 
@@ -897,6 +907,7 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
     files_to_scan.sort(key=lambda p: (1 if p.suffix.lower() in PDF_EXTS else 0, str(p)))
 
     counts = {"new": 0, "updated": 0, "unchanged": 0, "moved": 0, "deleted": 0, "skipped": 0, "error": 0}
+    paths: dict[str, list[str]] = {k: [] for k in counts}
     seen_paths: set[str] = set()
     started_at = datetime.now(tz=timezone.utc).isoformat()
 
@@ -948,9 +959,12 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             try:
                 result = index_file(con, vault_path, abs_path,
                                     extract_metadata_now=extract_metadata_now)
-                counts[result["status"]] = counts.get(result["status"], 0) + 1
+                status = result["status"]
+                counts[status] = counts.get(status, 0) + 1
+                paths.setdefault(status, []).append(rel)
             except Exception as e:
                 counts["error"] += 1
+                paths.setdefault("error", []).append(rel)
                 emit_progress(processed_files=i, current_file=rel,
                               phase="indexing", last_error=f"{rel}: {e}")
                 if pbar is not None:
@@ -995,6 +1009,7 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
                 )
                 con.execute("DELETE FROM files WHERE id=?", (row["id"],))
                 counts["deleted"] += 1
+                paths.setdefault("deleted", []).append(row["path"])
         con.commit()
 
         if report_progress:
@@ -1008,7 +1023,7 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
                 "processed_files": len(files_to_scan),
                 "counts": counts,
             })
-        return counts
+        return {"counts": counts, "paths": paths}
 
     except Exception as e:
         if report_progress:
@@ -1252,8 +1267,10 @@ if __name__ == "__main__":
             # Frontmatter shortcut still populates metadata for Journal/People/Cellar.
             if sys.stdout.isatty():
                 print("Phase 1: chunk + embed (no metadata yet)…", file=sys.stderr)
-            counts1 = reconcile(con, scope, file_filter=file_filter,
-                                extract_metadata_now=False)
+            phase1 = reconcile(con, scope, file_filter=file_filter,
+                               extract_metadata_now=False)
+            counts1 = phase1["counts"]
+            files1 = phase1["paths"]
 
             # Phase 2: backfill LLM metadata, unless --no-metadata was passed.
             # Skip silently if nothing is pending — common case on re-runs.
@@ -1274,7 +1291,8 @@ if __name__ == "__main__":
                     counts2 = {"processed": 0, "errors": 0, "remaining": 0,
                                "total_pending": 0}
 
-            out = {"ok": True, "phase_1_counts": counts1, "filter": file_filter}
+            out = {"ok": True, "phase_1_counts": counts1,
+                   "phase_1_files": files1, "filter": file_filter}
             if counts2 is not None:
                 out["phase_2_counts"] = counts2
             else:
