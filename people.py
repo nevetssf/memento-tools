@@ -42,7 +42,7 @@ PEOPLE_DIR = str(_PEOPLE_DIR)
 # Explicit relationship types (stored in DB). Family relationships beyond 'parent'
 # are inferred from the parent/child graph — see Relationship Inference Engine below.
 VALID_TYPES = {
-    "spouse", "parent", "friend", "acquaintance",
+    "spouse", "parent", "friend", "ex-friend", "acquaintance",
     "coworker", "manager", "report", "neighbor",
     "boyfriend", "girlfriend",
     "ex-boyfriend", "ex-girlfriend", "ex-spouse",
@@ -65,14 +65,14 @@ INFERRED_FAMILY_TYPES = {
 
 # Types where having the same type in both directions is valid (symmetric)
 SYMMETRIC_TYPES = {
-    "spouse", "ex-spouse", "friend", "acquaintance", "coworker", "neighbor", "courtesy-cousin",
+    "spouse", "ex-spouse", "friend", "ex-friend", "acquaintance", "coworker", "neighbor", "courtesy-cousin",
     "artist", "celebrity",
     # Romantic types are symmetric for same-sex couples (get_reciprocal returns same type for same gender)
     "boyfriend", "girlfriend", "ex-boyfriend", "ex-girlfriend",
 }
 
 RECIPROCALS = {
-    "spouse": "spouse", "ex-spouse": "ex-spouse", "friend": "friend", "acquaintance": "acquaintance", "coworker": "coworker",
+    "spouse": "spouse", "ex-spouse": "ex-spouse", "friend": "friend", "ex-friend": "ex-friend", "acquaintance": "acquaintance", "coworker": "coworker",
     "neighbor": "neighbor",
     # godparent reciprocals handled by get_reciprocal() (gender-dependent)
     "manager": "report", "report": "manager",
