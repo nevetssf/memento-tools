@@ -132,10 +132,13 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="init_journal",
-            description="Create today's journal file with frontmatter if it doesn't exist. Also sets location from LOCATION.md.",
+            description="Create today's journal file with frontmatter if it doesn't exist. Also sets location from LOCATION.md and logs today's weather to the journal. By default also sends the weather to Signal — pass include_signal=false to suppress that send (useful when you'll send your own greeting message).",
             inputSchema={
                 "type": "object",
-                "properties": {"date": date_prop}
+                "properties": {
+                    "date": date_prop,
+                    "include_signal": {"type": "boolean", "description": "Send weather via Signal as part of init (default: true). Set false if you'll send your own message that already covers the weather."}
+                }
             }
         ),
         # --- journal-header ---
@@ -355,14 +358,27 @@ async def list_tools() -> list[types.Tool]:
         # --- journal-pdf ---
         types.Tool(
             name="export_pdf",
-            description="Export a journal day as a styled PDF with inline photos.",
+            description=(
+                "Export one or more journal days as a single styled PDF with inline photos. "
+                "Days flow continuously (no forced page break). Per-day people / location "
+                "appear inline before each day's body."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "date": date_prop,
-                    "output": {"type": "string", "description": "Output PDF path (default: Journal/YYYY/pdf/YYYY-MM-DD.pdf)"},
-                    "include_people": {"type": "boolean", "default": False, "description": "Include people list in PDF"},
-                    "include_priorities": {"type": "boolean", "default": False, "description": "Include priorities section in PDF"}
+                    "dates": {
+                        "type": "string",
+                        "description": (
+                            "Date spec. Forms (mix freely with comma): "
+                            "'YYYY-MM-DD' (single), 'A..B' (inclusive range), "
+                            "'A,B,C' (explicit list), 'A..B,C,D..E' (mixed). "
+                            "Default: today."
+                        ),
+                    },
+                    "date": date_prop,  # back-compat alias for `dates`
+                    "output": {"type": "string", "description": "Output PDF path. Default: Journal/<year>/pdf/<auto-named>.pdf"},
+                    "include_people": {"type": "boolean", "default": False, "description": "Per-day people list"},
+                    "include_priorities": {"type": "boolean", "default": False, "description": "Per-day priorities section"}
                 }
             }
         ),
@@ -531,25 +547,33 @@ def _dispatch(name: str, args: dict) -> str:
 
     # --- journal-pdf ---
     elif name == "export_pdf":
-        d = date or jheader.get_local_date()
-        year = d[:4]
+        spec = args.get("dates") or args.get("date") or jheader.get_local_date()
+        try:
+            dates = jpdf.parse_dates(spec)
+        except ValueError as e:
+            return json.dumps({"error": f"bad date spec {spec!r}: {e}"})
         if args.get("output"):
             output_path = Path(args["output"])
         else:
-            pdf_dir = VAULT_DIR / "Journal" / year / "pdf"
-            pdf_dir.mkdir(parents=True, exist_ok=True)
-            output_path = pdf_dir / f"{d}.pdf"
+            output_path = jpdf.default_output_path(dates)
         buf_out = io.StringIO()
         buf_err = io.StringIO()
         try:
             with redirect_stdout(buf_out), redirect_stderr(buf_err):
                 jpdf.build_pdf(
-                    date_str=d,
+                    dates=dates,
                     output_path=output_path,
                     include_people=args.get("include_people", False),
                     include_priorities=args.get("include_priorities", False),
                 )
-            return json.dumps({"status": "ok", "output": str(output_path)})
+            warnings = [
+                ln for ln in buf_err.getvalue().splitlines()
+                if ln.startswith("warning:")
+            ]
+            result = {"status": "ok", "output": str(output_path), "days_rendered": len(dates) - len(warnings)}
+            if warnings:
+                result["skipped"] = warnings
+            return json.dumps(result)
         except SystemExit as e:
             err = buf_err.getvalue().strip()
             return err if err else json.dumps({"error": "export_pdf failed"})
