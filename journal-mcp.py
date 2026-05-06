@@ -269,7 +269,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="mark_priority_done",
-            description="Mark a priority as done (fuzzy match on task name).",
+            description="Check off a priority. Exact-match (case-insensitive) wins; otherwise single substring match. Errors on no/ambiguous match.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -277,6 +277,75 @@ async def list_tools() -> list[types.Tool]:
                     "date": date_prop
                 },
                 "required": ["task"]
+            }
+        ),
+        types.Tool(
+            name="unmark_priority_done",
+            description="Uncheck a priority that was previously marked done. Same matching rules as mark_priority_done.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Task name or partial match"},
+                    "date": date_prop
+                },
+                "required": ["task"]
+            }
+        ),
+        types.Tool(
+            name="remove_priority",
+            description="Delete a priority from the day's list (regardless of done state). Same matching rules as mark_priority_done.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Task name or partial match"},
+                    "date": date_prop
+                },
+                "required": ["task"]
+            }
+        ),
+        types.Tool(
+            name="apply_priority_template",
+            description=(
+                "Seed today's (or `date`'s) priorities from `Templates/Priorities.md` in the vault. "
+                "Defaults are merged in unchecked and deduped against existing labels — existing "
+                "priorities and their check states are preserved. Use this in the morning routine "
+                "if rollover hasn't run yet, or any time the user wants to re-seed defaults."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"date": date_prop}
+            }
+        ),
+        types.Tool(
+            name="rollover_priorities",
+            description=(
+                "Roll incomplete priorities forward and seed template defaults. "
+                "Default: yesterday → today. Use this for catching up after travel "
+                "(e.g. from_date=2026-04-30 to_date=today). Both source and target "
+                "must already have journal files; target is updated in place with "
+                "incomplete tasks from source + Templates/Priorities.md defaults."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from_date": {"type": "string", "description": "Source date YYYY-MM-DD (default: yesterday)"},
+                    "to_date":   {"type": "string", "description": "Target date YYYY-MM-DD (default: today)"}
+                }
+            }
+        ),
+        types.Tool(
+            name="priorities_summary",
+            description=(
+                "Completion stats over a date range. Default: last 7 days through today. "
+                "Returns total / completed / open counts, completion rate, daily breakdown, "
+                "and a 'frequently_open' list (tasks left undone on multiple days)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from_date": {"type": "string", "description": "Range start YYYY-MM-DD inclusive (default: 7 days ago)"},
+                    "to_date":   {"type": "string", "description": "Range end YYYY-MM-DD inclusive (default: today)"}
+                }
             }
         ),
         # --- journal-location ---
@@ -506,6 +575,31 @@ def _dispatch(name: str, args: dict) -> str:
 
     elif name == "mark_priority_done":
         return _run(jpriorities.main, ["--done", args["task"]] + _date_arg(date))
+
+    elif name == "unmark_priority_done":
+        return _run(jpriorities.main, ["--unmark", args["task"]] + _date_arg(date))
+
+    elif name == "remove_priority":
+        return _run(jpriorities.main, ["--remove", args["task"]] + _date_arg(date))
+
+    elif name == "apply_priority_template":
+        return _run(jpriorities.main, ["--apply-template"] + _date_arg(date))
+
+    elif name == "rollover_priorities":
+        argv = ["--rollover"]
+        if args.get("from_date"):
+            argv += ["--from", args["from_date"]]
+        if args.get("to_date"):
+            argv += ["--to", args["to_date"]]
+        return _run(jpriorities.main, argv)
+
+    elif name == "priorities_summary":
+        argv = ["--summary"]
+        if args.get("from_date"):
+            argv += ["--from", args["from_date"]]
+        if args.get("to_date"):
+            argv += ["--to", args["to_date"]]
+        return _run(jpriorities.main, argv)
 
     # --- journal-weather ---
     elif name == "log_weather":

@@ -1,94 +1,83 @@
-#!/usr/bin/env python3
+#!/home/steven/memento-tools/.venv/bin/python3
+"""Cron entry: roll incomplete priorities forward + seed template defaults.
+
+Runs at 2 AM local time (configured in user crontab as 09:00 UTC for PDT).
+Imports priorities.py directly — no subprocess, uses the venv interpreter
+via the shebang above.
+
+Behavior:
+- "Today" is resolved via LOCATION.md → localtime (so it's correct even
+  when Steven is travelling and the cron's 09:00 UTC trigger lands on a
+  different local day than the system clock thinks).
+- If today's journal doesn't exist yet, this is a no-op (the journal is
+  initialized later by init_journal / log_entry; rollover will catch up
+  on the next 2 AM tick or via a manual rollover_priorities call).
+- Yesterday is `today - 1 day` in local-zone terms.
+- Always seeds template defaults from Templates/Priorities.md (with-template
+  is implicit at this entry point).
 """
-Rollover incomplete priorities from yesterday to today.
-Run via cron at 2am local time.
-"""
-import subprocess
+
+from __future__ import annotations
+
+import json
 import sys
-import re
+from datetime import datetime, timedelta
 from pathlib import Path
-from datetime import date, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import JOURNAL_DIR
-
-TODAY = date.today()
-YESTERDAY = TODAY - timedelta(days=1)
-
-PRIORITIES_SCRIPT = Path(__file__).parent / "priorities.py"
-
-def get_incomplete_priorities(journal_path: Path) -> list[str]:
-    """Parse a journal file for unchecked priorities."""
-    if not journal_path.exists():
-        return []
-
-    content = journal_path.read_text()
-    incomplete = []
-
-    # Look for unchecked priorities: - [ ] Task name
-    pattern = re.compile(r'^-\s+\[\s+\]\s+(.+)$', re.MULTILINE)
-    for match in pattern.finditer(content):
-        task = match.group(1).strip()
-        incomplete.append(task)
-
-    return incomplete
+import priorities  # noqa: E402
 
 
-def get_existing_priorities(date_str: str) -> list[str]:
-    """Get current priorities for a given date via the priorities script."""
-    cmd = ["python3", str(PRIORITIES_SCRIPT), "--date", date_str, "--list"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        return []
+def main() -> int:
+    today = priorities.get_today_date()
+    yesterday = (
+        datetime.strptime(today, "%Y-%m-%d").date() - timedelta(days=1)
+    ).isoformat()
 
-    import json
-    try:
-        data = json.loads(result.stdout)
-        return [p["task"] for p in data.get("priorities", []) if not p.get("done")]
-    except json.JSONDecodeError:
-        return []
+    src = priorities.journal_path(yesterday)
+    dst = priorities.journal_path(today)
 
-def main():
-    # Find yesterday's journal
-    year = YESTERDAY.strftime("%Y")
-    journal_file = JOURNAL_DIR / year / f"{YESTERDAY}.md"
+    if not dst.exists():
+        # Today's journal hasn't been created yet; nothing to merge into.
+        # Cron will retry tomorrow; manual `rollover_priorities` MCP call
+        # can also do it later once the journal exists.
+        print(json.dumps({
+            "skipped": True,
+            "reason": f"no journal yet at {dst}",
+            "from": yesterday,
+            "to": today,
+        }))
+        return 0
 
-    if not journal_file.exists():
-        print(f"No journal found for {YESTERDAY}, skipping rollover.")
-        sys.exit(0)
+    incomplete = [label for done, label in priorities.read_priorities(src) if not done]
+    template_defaults = priorities.read_template_defaults()
 
-    incomplete = get_incomplete_priorities(journal_file)
+    with priorities._file_lock(dst):
+        items = priorities.read_priorities(dst)
+        existing = {label for _, label in items}
+        added_from_yesterday = []
+        added_from_template = []
+        for label in incomplete:
+            if label not in existing:
+                items.append((False, label))
+                existing.add(label)
+                added_from_yesterday.append(label)
+        for label in template_defaults:
+            if label not in existing:
+                items.append((False, label))
+                existing.add(label)
+                added_from_template.append(label)
+        priorities._write_priorities(dst, items)
 
-    if not incomplete:
-        print(f"No incomplete priorities for {YESTERDAY}, nothing to roll over.")
-        sys.exit(0)
+    print(json.dumps({
+        "from": yesterday,
+        "to": today,
+        "added_from_yesterday": added_from_yesterday,
+        "added_from_template": added_from_template,
+        "total_after": len(items),
+    }))
+    return 0
 
-    today_str = TODAY.strftime("%Y-%m-%d")
-
-    # Get existing incomplete priorities for today
-    existing = get_existing_priorities(today_str)
-
-    # Merge: existing + incomplete from yesterday (deduplicated, preserving existing order)
-    all_tasks = existing[:]
-    for task in incomplete:
-        if task not in all_tasks:
-            all_tasks.append(task)
-
-    print(f"Rollover {len(incomplete)} incomplete priorities to {today_str}:")
-    for task in incomplete:
-        print(f"  - {task}")
-    if existing:
-        print(f"Preserved existing incomplete priorities: {existing}")
-
-    # Build the command
-    cmd = ["python3", str(PRIORITIES_SCRIPT), "--date", today_str, "--set"] + all_tasks
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(f"Error running priorities script: {result.stderr}")
-        sys.exit(1)
-    else:
-        print(f"Done.")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
