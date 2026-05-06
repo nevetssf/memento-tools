@@ -190,12 +190,14 @@ def _dispatch(name: str, args: dict) -> str:
 
         # Synchronous: phase 1 (chunk + embed) then phase 2 (metadata) unless opted out.
         if subpath:
-            counts1 = _reconcile_subdir(con, vault_path, file_filter=file_filter,
-                                        extract_metadata_now=False)
+            phase1 = _reconcile_subdir(con, vault_path, file_filter=file_filter,
+                                       extract_metadata_now=False)
         else:
-            counts1 = ve.reconcile(con, VAULT_DIR, file_filter=file_filter,
-                                   extract_metadata_now=False)
-        out = {"ok": True, "background": False, "phase_1_counts": counts1,
+            phase1 = ve.reconcile(con, VAULT_DIR, file_filter=file_filter,
+                                  extract_metadata_now=False)
+        out = {"ok": True, "background": False,
+               "phase_1_counts": phase1["counts"],
+               "phase_1_files": phase1["paths"],
                "path": str(vault_path), "filter": file_filter,
                "extract_metadata": extract_meta}
         if extract_meta:
