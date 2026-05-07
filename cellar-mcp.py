@@ -137,10 +137,15 @@ def producer_content(type_: str, producer: str, region: str, country: str) -> st
         # Take everything up to (but not including) the first body --- divider
         parts = tmpl.split("\n---\n")
         producer_tmpl = parts[0] + "\n---\n" + parts[1] if len(parts) >= 2 else tmpl
-        return _fill(producer_tmpl, values).rstrip() + "\n"
+        out = _fill(producer_tmpl, values).rstrip() + "\n"
+        # Suppress empty `**` italic line (cosmetic — comes from `*{{location}}*`
+        # in the template when location is empty).
+        out = re.sub(r'^\*\*\s*$\n?', '', out, flags=re.MULTILINE)
+        return out
     # Fallback if template missing
     key = "vintner" if type_ == "wine" else "shipper" if type_ == "port" else "distillery"
-    return f"---\n{key}: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [{type_}]\n---\n\n# {producer}\n\n*{loc}*\n"
+    loc_line = f"\n*{loc}*\n" if loc else ""
+    return f"---\n{key}: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [{type_}]\n---\n\n# {producer}\n{loc_line}"
 
 
 def entry_content(type_: str, name: str, fields: dict) -> str:
@@ -216,8 +221,12 @@ def update_inline_field(section: str, field: str, value: str, append: bool = Fal
     return section + new_line + "\n"
 
 
-def update_body_section(section: str, key: str, value: str, append: bool = False) -> str:
+def update_body_section(section: str, key: str, value: str, append: bool = False) -> tuple[str, bool]:
     """Replace or set the value after a `**Key:**` marker.
+
+    Returns (new_section, found). If `found` is False, the section is
+    unchanged because the marker isn't present — caller should surface
+    that as an error rather than silently writing nothing.
 
     With `append=True`, the new value is joined to any existing non-empty
     value with ` — ` (em dash) instead of replacing. If the existing value
@@ -232,7 +241,7 @@ def update_body_section(section: str, key: str, value: str, append: bool = False
         return f"{prefix}{value}"
 
     updated, n = re.subn(pattern, _replace, section, flags=re.MULTILINE)
-    return updated if n else section
+    return (updated, True) if n else (section, False)
 
 
 def parse_entries(text: str) -> list[dict]:
@@ -606,7 +615,12 @@ def _dispatch(name: str, args: dict) -> str:
             body_markers = BODY_SECTIONS.get(type_, [])
             marker = next((m for m in body_markers if m.lower() == field.lower()), None)
             if marker:
-                section = update_body_section(section, marker, value, append=append)
+                section, found = update_body_section(section, marker, value, append=append)
+                if not found:
+                    return json.dumps({
+                        "error": f"Body marker '**{marker}:**' not found in this bottle entry. "
+                                 f"The bottle may have been hand-edited or use a non-template layout.",
+                    })
             else:
                 section = update_inline_field(section, field, value, append=append)
 
@@ -651,6 +665,17 @@ def _dispatch(name: str, args: dict) -> str:
     if name == "rate_bottle":
         type_, err = _validate_type(args.get("type"))
         if err: return json.dumps({"error": err})
+        # Validate rating is numeric. A non-numeric value would be written
+        # verbatim, then silently break the min_rating filter in
+        # search_cellar (float() would raise → entry skipped).
+        try:
+            rating_val = float(args["rating"])
+        except (TypeError, ValueError):
+            return json.dumps({"error": f"`rating` must be numeric (got {args.get('rating')!r})"})
+        # Render as int when whole, otherwise keep one decimal — matches how
+        # ratings are typically written ("88" not "88.0").
+        rating_str = str(int(rating_val)) if rating_val == int(rating_val) else f"{rating_val:.1f}"
+
         path = producer_path(type_, args["producer"])
         if not path.exists():
             return json.dumps({"error": f"No note found for '{args['producer']}'"})
@@ -663,13 +688,13 @@ def _dispatch(name: str, args: dict) -> str:
 
             start, end = bounds
             section = text[start:end]
-            section = update_inline_field(section, "rating", str(args["rating"]))
+            section = update_inline_field(section, "rating", rating_str)
             section = update_inline_field(section, "date_tasted", args.get("date_tasted") or get_local_date())
             if args.get("would_buy_again"):
                 section = update_inline_field(section, "would_buy_again", args["would_buy_again"])
 
             path.write_text(text[:start] + section + text[end:])
-        return json.dumps({"ok": True, "rating": args["rating"], "date_tasted": args.get("date_tasted") or get_local_date()})
+        return json.dumps({"ok": True, "rating": rating_val, "date_tasted": args.get("date_tasted") or get_local_date()})
 
     if name == "consume_bottle":
         type_, err = _validate_type(args.get("type"))
@@ -687,7 +712,9 @@ def _dispatch(name: str, args: dict) -> str:
             start, end = bounds
             section = text[start:end]
 
-            qty_match = re.search(r'^quantity::\s*(\S*)', section, re.MULTILINE)
+            # `[ \t]*` not `\s*` — `\s` matches newlines, which would let
+            # an empty `quantity::` line absorb the next line's content.
+            qty_match = re.search(r'^quantity::[ \t]*(.*)$', section, re.MULTILINE)
             current_str = qty_match.group(1).strip() if qty_match else ""
             try:
                 current = int(current_str)
