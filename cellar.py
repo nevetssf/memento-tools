@@ -586,6 +586,101 @@ def read_bottle_note(con: sqlite3.Connection, bottle: str | int,
 # Show helpers (for show_producer / show_bottle MCP tools)
 # ---------------------------------------------------------------------------
 
+def merge_producers(con: sqlite3.Connection, source: str | int, target: str | int,
+                    *, append_notes: bool = True) -> dict:
+    """Merge `source` producer into `target`. After this:
+        - all of source's bottles point at target
+        - bottle name collisions are merged (tastings combined into target's bottle,
+          source bottle deleted; source's vault note file deleted, target's kept)
+        - bottles' vault notes are renamed/moved to the new producer folder
+        - source producer's note prose (if any) is appended to target's note
+        - source producer row + its note file are deleted
+    """
+    src = get_producer(con, source)
+    tgt = get_producer(con, target)
+    if not src:
+        raise KeyError(f"No producer matching source {source!r}")
+    if not tgt:
+        raise KeyError(f"No producer matching target {target!r}")
+    if src["id"] == tgt["id"]:
+        raise ValueError("source and target are the same producer")
+
+    moved: list[dict] = []
+    merged: list[dict] = []
+
+    src_bottles = con.execute(
+        "SELECT * FROM bottles WHERE producer_id=?", (src["id"],),
+    ).fetchall()
+
+    for sb in src_bottles:
+        # Does target have a bottle with this name (case-insensitive)?
+        existing = con.execute(
+            "SELECT id, obsidian_file FROM bottles WHERE producer_id=? AND name=? COLLATE NOCASE",
+            (tgt["id"], sb["name"]),
+        ).fetchone()
+
+        if existing:
+            # Bottle-name collision: move tastings, delete source bottle.
+            con.execute(
+                "UPDATE tastings SET bottle_id=? WHERE bottle_id=?",
+                (existing["id"], sb["id"]),
+            )
+            if sb["obsidian_file"]:
+                old_abs = absolute(sb["obsidian_file"])
+                if old_abs.exists():
+                    old_abs.unlink()
+            con.execute("DELETE FROM bottles WHERE id=?", (sb["id"],))
+            merged.append({
+                "bottle_name": sb["name"],
+                "merged_into_id": existing["id"],
+            })
+            continue
+
+        # Normal re-attribution
+        new_path = bottle_note_path(sb["type"], tgt["name"], sb["name"])
+        con.execute(
+            """UPDATE bottles
+                  SET producer_id=?, obsidian_file=?, updated_at=datetime('now')
+                WHERE id=?""",
+            (tgt["id"], new_path, sb["id"]),
+        )
+        if sb["obsidian_file"]:
+            old_abs = absolute(sb["obsidian_file"])
+            new_abs = absolute(new_path)
+            if old_abs.exists() and old_abs != new_abs:
+                new_abs.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _shutil
+                _shutil.move(str(old_abs), str(new_abs))
+        moved.append({"bottle_name": sb["name"], "bottle_id": sb["id"]})
+
+    # Carry over source's producer-note prose (minus frontmatter), if any.
+    if append_notes and src["obsidian_file"]:
+        old_note_abs = absolute(src["obsidian_file"])
+        if old_note_abs.exists():
+            content = old_note_abs.read_text()
+            body = re.sub(r"^---\n.*?\n---\n", "", content, count=1, flags=re.DOTALL).strip()
+            # Strip the auto-generated `# <Producer>` H1 if it's the only thing left
+            body = re.sub(rf"^#\s+{re.escape(src['name'])}\s*\n?", "", body, count=1).strip()
+            if body:
+                append_producer_note(
+                    con, tgt["id"],
+                    f"\n## (merged from {src['name']})\n\n{body}\n",
+                )
+            old_note_abs.unlink()
+
+    # Delete source producer row
+    con.execute("DELETE FROM producers WHERE id=?", (src["id"],))
+
+    return {
+        "merged_into": tgt["name"],
+        "removed_producer": src["name"],
+        "bottles_re_attributed": len(moved),
+        "bottles_merged_by_name": len(merged),
+        "moved": moved,
+        "merged": merged,
+    }
+
+
 def show_producer(con: sqlite3.Connection, name_or_id: str | int) -> dict | None:
     p = get_producer(con, name_or_id)
     if not p:

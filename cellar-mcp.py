@@ -101,6 +101,29 @@ async def list_tools() -> list[types.Tool]:
             description="Delete a producer. CASCADE drops their bottles + tastings. Vault notes are NOT deleted.",
             inputSchema={"type": "object", "properties": {"name_or_id": name_or_id_prop}, "required": ["name_or_id"]},
         ),
+        types.Tool(
+            name="merge_producers",
+            description=(
+                "Merge two producer records. All of `source`'s bottles get re-attributed to "
+                "`target` (their producer_id flips, vault notes move to the new producer "
+                "folder). Bottle-name collisions are auto-merged: tastings move to target's "
+                "matching bottle, source's bottle is dropped. Source producer's note prose "
+                "is appended to target's note under a '(merged from <name>)' header. The "
+                "source producer row + note file are deleted. "
+                "Use when Steven says 'Producer X is actually Producer Y' or for cleaning "
+                "up post-migration redundant producers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {**name_or_id_prop, "description": "The producer being absorbed (will be deleted)."},
+                    "target": {**name_or_id_prop, "description": "The producer that survives."},
+                    "append_notes": {"type": "boolean", "default": True,
+                                     "description": "Carry source's note prose into target's note. Default true."}
+                },
+                "required": ["source", "target"],
+            },
+        ),
         # ----- bottles -----
         types.Tool(
             name="add_bottle",
@@ -364,6 +387,14 @@ def _dispatch(name: str, args: dict):
         if name == "delete_producer":
             n = cdb.delete_producer(con, _name_or_id(args["name_or_id"]))
             return {"deleted_rows": n}
+        if name == "merge_producers":
+            with cdb.transaction(con):
+                return cdb.merge_producers(
+                    con,
+                    _name_or_id(args["source"]),
+                    _name_or_id(args["target"]),
+                    append_notes=args.get("append_notes", True),
+                )
 
         # bottles
         if name == "add_bottle":
