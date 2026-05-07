@@ -75,6 +75,11 @@ BODY_SECTIONS = {
     "port":    ["Color", "Nose", "Palate", "Finish", "Notes", "Food pairings"],
 }
 
+# Flat set of all body markers across types — used by parse_entries to
+# scan a bottle's body for `Marker: value` lines without needing to know
+# the bottle's type.
+_ALL_BODY_MARKERS = {m for markers in BODY_SECTIONS.values() for m in markers}
+
 # ---------------------------------------------------------------------------
 # Template helpers
 # ---------------------------------------------------------------------------
@@ -129,7 +134,7 @@ def _fill_inline_fields(section: str, fields: dict) -> str:
 
 
 def producer_content(type_: str, producer: str, region: str, country: str) -> str:
-    """Build producer file content from template."""
+    """Build producer file content from template (plain text, no italic)."""
     loc = f"{region}{', ' + country if country else ''}" if region else country or ""
     values = {"producer": producer, "region": region or "", "country": country or "", "location": loc}
     tmpl = _read_template(type_)
@@ -137,14 +142,10 @@ def producer_content(type_: str, producer: str, region: str, country: str) -> st
         # Take everything up to (but not including) the first body --- divider
         parts = tmpl.split("\n---\n")
         producer_tmpl = parts[0] + "\n---\n" + parts[1] if len(parts) >= 2 else tmpl
-        out = _fill(producer_tmpl, values).rstrip() + "\n"
-        # Suppress empty `**` italic line (cosmetic — comes from `*{{location}}*`
-        # in the template when location is empty).
-        out = re.sub(r'^\*\*\s*$\n?', '', out, flags=re.MULTILINE)
-        return out
+        return _fill(producer_tmpl, values).rstrip() + "\n"
     # Fallback if template missing
     key = "vintner" if type_ == "wine" else "shipper" if type_ == "port" else "distillery"
-    loc_line = f"\n*{loc}*\n" if loc else ""
+    loc_line = f"\n{loc}\n" if loc else ""
     return f"---\n{key}: {producer}\nregion: {region or ''}\ncountry: {country or ''}\ntags: [{type_}]\n---\n\n# {producer}\n{loc_line}"
 
 
@@ -222,7 +223,12 @@ def update_inline_field(section: str, field: str, value: str, append: bool = Fal
 
 
 def update_body_section(section: str, key: str, value: str, append: bool = False) -> tuple[str, bool]:
-    """Replace or set the value after a `**Key:**` marker.
+    """Replace or set the value after a plain `Key:` marker.
+
+    Section markers are plain text now (no bold) — `Notes: …`, `Nose: …`,
+    etc. — so they render in a regular font in Obsidian. The single colon
+    distinguishes them from inline Dataview fields (`field:: value`, double
+    colon).
 
     Returns (new_section, found). If `found` is False, the section is
     unchanged because the marker isn't present — caller should surface
@@ -232,7 +238,8 @@ def update_body_section(section: str, key: str, value: str, append: bool = False
     value with ` — ` (em dash) instead of replacing. If the existing value
     is empty, behaves the same as replace.
     """
-    pattern = rf'(\*\*{re.escape(key)}:\*\*[ \t]*)(.*)'
+    # `(?!:)` lookahead: don't match `Key::` (which is a Dataview inline field).
+    pattern = rf'^({re.escape(key)}:(?!:)[ \t]*)(.*)$'
 
     def _replace(m: re.Match) -> str:
         prefix, existing = m.group(1), m.group(2).strip()
@@ -260,13 +267,19 @@ def parse_entries(text: str) -> list[dict]:
         if not m:
             continue
         entry = {"_name": m.group(1).strip()}
-        # `[ \t]*` not `\s*` between `::` and value — `\s` matches newlines,
-        # so an empty `style::` line was absorbing the next line's content as
-        # its value. Restrict to horizontal whitespace.
+        # Inline Dataview fields: `key:: value` (double colon).
+        # `[ \t]*` not `\s*` — `\s` matches newlines, so an empty `style::`
+        # line would absorb the next line's content.
         for match in re.finditer(r'^(\w+)::[ \t]*(.*)$', section, re.MULTILINE):
             entry[match.group(1)] = match.group(2).strip()
-        for bm in re.finditer(r'\*\*([^*]+):\*\*[ \t]*([^\n]*)', section):
-            entry[f"_{bm.group(1).lower().replace(' ', '_')}"] = bm.group(2).strip()
+        # Body section markers (plain text, single colon). Enumerate the
+        # known markers across all types so we don't accidentally match
+        # arbitrary `Word: text` prose lines as section markers.
+        for marker in _ALL_BODY_MARKERS:
+            body_re = rf'^{re.escape(marker)}:(?!:)[ \t]*(.*)$'
+            bm = re.search(body_re, section, re.MULTILINE)
+            if bm:
+                entry[f"_{marker.lower().replace(' ', '_')}"] = bm.group(1).strip()
         entries.append(entry)
     return entries
 
@@ -350,7 +363,7 @@ async def list_tools() -> list[types.Tool]:
                     "type": type_prop,
                     "producer": producer_prop,
                     "name": name_prop,
-                    "field": {"type": "string", "description": "Field name — inline (varietal, vintage, abv, botanicals, etc.) or body marker (Nose, Palate, Finish, Notes, Color, Appearance, Food pairings, With water)"},
+                    "field": {"type": "string", "description": "Field name — inline Dataview (varietal, vintage, abv, botanicals, etc., written `key:: value`) or body marker (Nose, Palate, Finish, Notes, Color, Appearance, Food pairings, With water — written `Marker: value` in plain text)"},
                     "value": {"type": "string"},
                     "append": {
                         "type": "boolean",
@@ -618,7 +631,7 @@ def _dispatch(name: str, args: dict) -> str:
                 section, found = update_body_section(section, marker, value, append=append)
                 if not found:
                     return json.dumps({
-                        "error": f"Body marker '**{marker}:**' not found in this bottle entry. "
+                        "error": f"Body marker '{marker}:' not found in this bottle entry. "
                                  f"The bottle may have been hand-edited or use a non-template layout.",
                     })
             else:
