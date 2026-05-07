@@ -23,7 +23,23 @@ from journal_fm import get_local_date
 
 app = Server("cellar-db")
 
-VALID_TYPES = list(CELLAR_DIRS.keys())  # wine, whiskey, gin, vodka
+VALID_TYPES = list(CELLAR_DIRS.keys())  # wine, whiskey, gin, vodka, tequila, mezcal, rum, port
+
+# Bolded `**Marker:**` body-section names per type, mirroring the
+# Templates/<Type> Note.md files. Used by update_bottle to decide whether
+# a given field is a body section (use update_body_section) or an inline
+# Dataview field (use update_inline_field). Case-insensitive matching
+# against this list — preserves the canonical casing of the marker.
+BODY_SECTIONS = {
+    "wine":    ["Appearance", "Nose", "Palate", "Finish", "Notes", "Food pairings"],
+    "whiskey": ["Color", "Nose", "Palate", "With water", "Finish", "Notes"],
+    "gin":     ["Nose", "Palate", "Finish", "Notes"],
+    "vodka":   ["Nose", "Palate", "Finish", "Notes"],
+    "tequila": ["Nose", "Palate", "Finish", "Notes"],
+    "mezcal":  ["Color", "Nose", "Palate", "Finish", "Notes"],
+    "rum":     ["Color", "Nose", "Palate", "Finish", "Notes"],
+    "port":    ["Color", "Nose", "Palate", "Finish", "Notes", "Food pairings"],
+}
 
 # ---------------------------------------------------------------------------
 # Template helpers
@@ -349,9 +365,15 @@ def _dispatch(name: str, args: dict) -> str:
         section = text[start:end]
         field, value = args["field"], args["value"]
 
-        # Body section (Nose, Palate, etc.) vs inline field
-        if field.title() in BODY_SECTIONS.get(type_, []):
-            section = update_body_section(section, field.title(), value)
+        # Case-insensitive match against the type's body markers. If the
+        # field matches, route to update_body_section using the canonical
+        # marker casing (e.g. "Food pairings", not "Food Pairings" — title()
+        # would mangle multi-word markers). Otherwise treat as an inline
+        # Dataview field (`field:: value`).
+        body_markers = BODY_SECTIONS.get(type_, [])
+        marker = next((m for m in body_markers if m.lower() == field.lower()), None)
+        if marker:
+            section = update_body_section(section, marker, value)
         else:
             section = update_inline_field(section, field, value)
 
