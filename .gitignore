@@ -5,3 +5,4 @@ __pycache__/
 localtime-aliases.json
 .venv/
 .chat_reconcile_state.json
+cellar-mcp.py.yaml-bak
