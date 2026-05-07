@@ -58,13 +58,15 @@ def get_local_time(location):
             return json.loads(result.stdout.strip())
     except Exception:
         pass
-    # Fallback
-    now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    # Fallback: resolver failed. Use UTC honestly — Steven will see the "UTC"
+    # tag in his journal heading and know the location resolver isn't working,
+    # rather than getting silently-wrong "PDT" timestamps when he's in MDT etc.
+    now = datetime.now(ZoneInfo("UTC"))
     return {
         "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M"),
-        "timestamp": now.strftime("%H:%M PDT"),
-        "abbreviation": "PDT",
+        "timestamp": now.strftime("%H:%M UTC"),
+        "abbreviation": "UTC",
         "datetime": now.isoformat(),
     }
 
@@ -216,18 +218,22 @@ def main():
     timestamp = time_info["timestamp"]
     day_of_week = get_day_of_week(date_str)
 
-    # Build filename using current wall-clock time for uniqueness
+    # Build filename using LOCAL wall-clock time (from time_info["datetime"])
+    # so the filename's HH-MM-SS matches the journal heading and Steven's
+    # perception of "when this photo was logged". Previously used naive
+    # datetime.now() which on this UTC-system host produced filenames offset
+    # by ~7-8 hours from the local-time heading.
     loc_safe = safe_location_name(location)
     ext = image_path.suffix.lower()
-    now = datetime.now()
-    time_part = now.strftime("%H-%M-%S")
+    local_dt = datetime.fromisoformat(time_info["datetime"])
+    time_part = local_dt.strftime("%H-%M-%S")
     new_filename = f"{date_str}_{time_part}_{loc_safe}{ext}"
     year = date_str[:4]
     photos_dir = JOURNAL_BASE / year / "photos"
     photos_dir.mkdir(parents=True, exist_ok=True)
-    # If seconds still collide, add milliseconds
+    # If seconds still collide, append microseconds (also from local_dt for consistency).
     if (photos_dir / new_filename).exists():
-        time_part = now.strftime("%H-%M-%S-") + f"{now.microsecond // 1000:03d}"
+        time_part = local_dt.strftime("%H-%M-%S-") + f"{local_dt.microsecond // 1000:03d}"
         new_filename = f"{date_str}_{time_part}_{loc_safe}{ext}"
 
     dest_path = photos_dir / new_filename
