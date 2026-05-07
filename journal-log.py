@@ -41,6 +41,40 @@ def ensure_frontmatter(journal_path: Path, date_str: str):
             journal_path.write_text(template + sep + existing)
 
 
+def normalize_timestamp(ts: str) -> str:
+    """Accept loose time strings and return canonical `HH:MM TZ` (24-hour, zero-padded).
+
+    Handles:
+      "1:39 PM PDT"  → "13:39 PDT"
+      "12:00 AM PDT" → "00:00 PDT"
+      "12:30 PM PDT" → "12:30 PDT"
+      "7:14 PDT"     → "07:14 PDT"   (just zero-pad)
+      "13:39 PDT"    → "13:39 PDT"   (already canonical)
+      ""             → ""             (empty stays empty — caller will derive from now)
+
+    The agent has been observed passing 12-hour format with "AM"/"PM" suffixes
+    despite the SKILL.md spec; rather than rejecting, normalize and move on so
+    chronological insertion still works.
+    """
+    if not ts or not ts.strip():
+        return ts
+    s = ts.strip()
+    # 12-hour with AM/PM suffix
+    m = re.match(r'^(\d{1,2}):(\d{2})\s*([AaPp])[Mm]\s*(.*)$', s)
+    if m:
+        hour = int(m.group(1)) % 12
+        if m.group(3).lower() == 'p':
+            hour += 12
+        rest = m.group(4).strip()
+        return f"{hour:02d}:{m.group(2)}" + (f" {rest}" if rest else "")
+    # Already 24-hour-ish; just zero-pad the hour for consistency
+    m = re.match(r'^(\d{1,2}):(\d{2})\s*(.*)$', s)
+    if m:
+        rest = m.group(3).strip()
+        return f"{int(m.group(1)):02d}:{m.group(2)}" + (f" {rest}" if rest else "")
+    return s
+
+
 def parse_time_minutes(timestamp: str) -> int | None:
     m = re.match(r'(\d{1,2}):(\d{2})', timestamp)
     return int(m.group(1)) * 60 + int(m.group(2)) if m else None
@@ -87,7 +121,7 @@ def main():
 
     time_info = get_time_info()
     date_str = args.date or time_info["date"]
-    timestamp = args.time or time_info["timestamp"]
+    timestamp = normalize_timestamp(args.time) if args.time else time_info["timestamp"]
 
     journal_path = get_journal_path(date_str)
     existed = journal_path.exists()
