@@ -7,6 +7,8 @@ files containing multiple bottle entries using inline Dataview fields.
 """
 
 import asyncio
+import contextlib
+import fcntl
 import json
 import re
 import sys
@@ -20,6 +22,38 @@ from mcp.server.stdio import stdio_server
 sys.path.insert(0, str(Path(__file__).parent))
 from config import CELLAR_DIRS, LOCATION_FILE, TEMPLATES_DIR
 from journal_fm import get_local_date
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _validate_type(type_: str | None) -> tuple[str, str | None]:
+    """Normalize + validate. Returns (lowercased_type, error_message_or_None)."""
+    if not type_:
+        return "", "Missing required `type`"
+    t = type_.lower()
+    if t not in VALID_TYPES:
+        return t, f"Invalid type '{type_}'. Valid: {', '.join(VALID_TYPES)}"
+    return t, None
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """Exclusive flock via a sidecar `.lock` file.
+
+    Same pattern as chat_signal / priorities. Serializes concurrent writers —
+    relevant when Obsidian sync (or another agent) might touch the same file
+    during a read-modify-write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with open(lock_path, "w") as lockf:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
 
 app = Server("cellar-db")
 
@@ -57,16 +91,40 @@ def _fill(template: str, values: dict) -> str:
     return re.sub(r"\{\{[^}]+\}\}", "", template)
 
 
+_FILL_SKIP = {"type", "producer", "name", "region", "country", "overwrite", "append"}
+
+
 def _fill_inline_fields(section: str, fields: dict) -> str:
-    """Fill blank inline fields (key:: ) with provided values."""
+    """Populate inline `field:: value` lines from the given dict.
+
+    For fields that exist as `field::` in the section, replace the empty
+    value. For fields NOT in the template (e.g. `quantity::` on a gin
+    bottle, since the gin template doesn't pre-declare it), append a new
+    inline line after the last existing `field::` so the value isn't lost.
+
+    Skips structural args (type/producer/name/region/country) that aren't
+    bottle metadata. Booleans are normalized to lowercase ("true"/"false").
+    """
     for field, val in fields.items():
-        if val is not None and str(val) != "":
-            section = re.sub(
-                rf"^{re.escape(field)}::[ \t]*$",
-                f"{field}:: {val}",
-                section,
-                flags=re.MULTILINE,
-            )
+        if field in _FILL_SKIP:
+            continue
+        if val is None or str(val) == "":
+            continue
+        if isinstance(val, bool):
+            val = "true" if val else "false"
+        pattern = rf"^{re.escape(field)}::[ \t]*$"
+        new_line = f"{field}:: {val}"
+        section_new, n = re.subn(pattern, new_line, section, count=1, flags=re.MULTILINE)
+        if n:
+            section = section_new
+            continue
+        # Field not in template — append after the last existing inline field.
+        last_field_end = max(
+            (m.end() for m in re.finditer(r'^\w+::.*\n?', section, re.MULTILINE)),
+            default=None,
+        )
+        if last_field_end is not None:
+            section = section[:last_field_end] + new_line + "\n" + section[last_field_end:]
     return section
 
 
@@ -193,9 +251,12 @@ def parse_entries(text: str) -> list[dict]:
         if not m:
             continue
         entry = {"_name": m.group(1).strip()}
-        for match in re.finditer(r'^(\w+)::\s*(.*)', section, re.MULTILINE):
+        # `[ \t]*` not `\s*` between `::` and value — `\s` matches newlines,
+        # so an empty `style::` line was absorbing the next line's content as
+        # its value. Restrict to horizontal whitespace.
+        for match in re.finditer(r'^(\w+)::[ \t]*(.*)$', section, re.MULTILINE):
             entry[match.group(1)] = match.group(2).strip()
-        for bm in re.finditer(r'\*\*([^*]+):\*\*\s*(.*)', section):
+        for bm in re.finditer(r'\*\*([^*]+):\*\*[ \t]*([^\n]*)', section):
             entry[f"_{bm.group(1).lower().replace(' ', '_')}"] = bm.group(2).strip()
         entries.append(entry)
     return entries
@@ -207,7 +268,8 @@ def parse_entries(text: str) -> list[dict]:
 
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
-    type_prop = {"type": "string", "description": "Category: wine, whiskey, gin, or vodka"}
+    types_csv = ", ".join(VALID_TYPES)
+    type_prop = {"type": "string", "description": f"Category: {types_csv}"}
     producer_prop = {"type": "string", "description": "Producer/vintner/distillery name (used as filename)"}
     name_prop = {"type": "string", "description": "Bottle/expression name"}
 
@@ -234,7 +296,11 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="add_bottle",
-            description="Add a new bottle entry to a producer's note. Creates the producer file if it doesn't exist.",
+            description=(
+                "Add a new bottle entry to a producer's note. Creates the producer "
+                "file if it doesn't exist. Errors if a bottle with the same name "
+                "already exists; pass `overwrite=true` to replace it."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -244,16 +310,17 @@ async def list_tools() -> list[types.Tool]:
                     "region": {"type": "string"},
                     "country": {"type": "string"},
                     "varietal": {"type": "string", "description": "Wine only — grape variety or blend"},
-                    "vintage": {"type": "integer", "description": "Wine/whiskey — year"},
-                    "age": {"type": "string", "description": "Whiskey only — age statement e.g. '12' or 'NAS'"},
+                    "vintage": {"type": "integer", "description": "Wine/whiskey/port — year"},
+                    "age": {"type": "string", "description": "Whiskey/rum/tequila — age statement e.g. '12' or 'NAS'"},
                     "abv": {"type": "number"},
-                    "cask": {"type": "string", "description": "Whiskey — cask type e.g. 'ex-bourbon, sherry'"},
+                    "cask": {"type": "string", "description": "Whiskey/rum — cask type e.g. 'ex-bourbon, sherry'"},
                     "botanicals": {"type": "string", "description": "Gin — key botanicals"},
                     "base": {"type": "string", "description": "Vodka — base ingredient e.g. 'potato', 'grain'"},
-                    "style": {"type": "string", "description": "Gin — style e.g. 'London Dry', 'Contemporary'"},
+                    "style": {"type": "string", "description": "Style label — e.g. 'London Dry', 'Contemporary' (gin), 'Single Malt' (whiskey)"},
                     "price": {"type": "number"},
                     "quantity": {"type": "integer"},
                     "in_cellar": {"type": "boolean"},
+                    "overwrite": {"type": "boolean", "default": False, "description": "Replace an existing bottle with the same name. Default false → duplicate adds error."},
                 },
                 "required": ["type", "producer", "name"]
             }
@@ -360,18 +427,86 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search_cellar",
-            description="Search cellar notes. Returns all bottles of a given type, or filter by producer, varietal, vintage, min rating, etc.",
+            description="Search cellar notes. Returns matching bottles. Omit `type` to search all categories. All filters combine with AND.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "description": "Filter by category (wine, whiskey, gin, vodka) — omit to search all"},
+                    "type": {"type": "string", "description": f"Filter by category ({types_csv}) — omit to search all"},
                     "producer": {"type": "string", "description": "Filter by producer name (partial match)"},
+                    "name":     {"type": "string", "description": "Filter by bottle/expression name (partial match)"},
                     "varietal": {"type": "string", "description": "Filter by varietal/grape (wine)"},
-                    "vintage": {"type": "integer", "description": "Filter by vintage year"},
+                    "vintage":  {"type": "integer", "description": "Filter by vintage year"},
                     "min_rating": {"type": "number", "description": "Minimum rating"},
                     "would_buy_again": {"type": "string", "description": "Filter by yes/no/maybe"},
                 },
                 "required": []
+            }
+        ),
+        types.Tool(
+            name="get_bottle",
+            description=(
+                "Return one bottle's parsed entry as a dict (inline fields like "
+                "varietal/vintage/abv/rating, plus body sections prefixed with `_` "
+                "like `_nose`, `_palate`, `_finish`, `_notes`). Use this instead of "
+                "get_note when you only need one bottle's data — saves the agent "
+                "from re-parsing a producer file's full markdown."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": type_prop,
+                    "producer": producer_prop,
+                    "name": name_prop,
+                },
+                "required": ["type", "producer", "name"]
+            }
+        ),
+        types.Tool(
+            name="recent_tastings",
+            description=(
+                "Bottles sorted by date_tasted descending. Useful for 'what did I drink "
+                "recently?' Only includes bottles that have a `date_tasted` set."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type":  {"type": "string", "description": f"Filter by category ({types_csv}) — omit for all"},
+                    "limit": {"type": "integer", "default": 20, "description": "Maximum bottles to return (default 20)"},
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="untasted_bottles",
+            description=(
+                "Bottles with no rating set yet. Useful for 'what should I open next?' "
+                "By default only includes bottles still in the cellar (in_cellar != false)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "description": f"Filter by category ({types_csv}) — omit for all"},
+                    "in_cellar_only": {"type": "boolean", "default": True, "description": "If true (default), only bottles still in the cellar."},
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="consume_bottle",
+            description=(
+                "Decrement a bottle's `quantity` after drinking some. Sets `in_cellar=false` "
+                "automatically when the new quantity reaches 0. Default decrement is 1. "
+                "Use this for 'I had a glass / finished a bottle' moments."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": type_prop,
+                    "producer": producer_prop,
+                    "name": name_prop,
+                    "decrement": {"type": "integer", "default": 1, "description": "How many to remove (default 1). For 'I finished it', use the current quantity."},
+                },
+                "required": ["type", "producer", "name"]
             }
         ),
     ]
@@ -395,9 +530,8 @@ def _dispatch(name: str, args: dict) -> str:
         return json.dumps({"types": VALID_TYPES})
 
     if name == "add_producer":
-        type_ = args["type"].lower()
-        if type_ not in VALID_TYPES:
-            return json.dumps({"error": f"Invalid type '{type_}'. Valid: {VALID_TYPES}"})
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         producer = args["producer"]
         path = producer_path(type_, producer)
         if path.exists():
@@ -407,63 +541,91 @@ def _dispatch(name: str, args: dict) -> str:
         return json.dumps({"ok": True, "file": str(path), "producer": producer, "type": type_})
 
     if name == "add_bottle":
-        type_ = args["type"].lower()
-        if type_ not in VALID_TYPES:
-            return json.dumps({"error": f"Invalid type '{type_}'. Valid: {VALID_TYPES}"})
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         producer = args["producer"]
         bottle_name = args["name"]
+        overwrite = bool(args.get("overwrite", False))
         path = producer_path(type_, producer)
 
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(producer_content(type_, producer, args.get("region", ""), args.get("country", "")))
+        with _file_lock(path):
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(producer_content(type_, producer, args.get("region", ""), args.get("country", "")))
 
-        entry = entry_content(type_, bottle_name, args)
-        text = path.read_text()
-        path.write_text(text.rstrip() + "\n\n---\n" + entry + "---\n")
-        return json.dumps({"ok": True, "file": str(path), "producer": producer, "name": bottle_name})
+            text = path.read_text()
+            # Exact-match dedup (parse_entries gives us each bottle's _name).
+            existing_names = [e["_name"] for e in parse_entries(text)]
+            if bottle_name in existing_names:
+                if not overwrite:
+                    return json.dumps({
+                        "error": f"Bottle '{bottle_name}' already exists at {path}. Use update_bottle to modify, or pass overwrite=true to replace.",
+                        "file": str(path),
+                    })
+                # Remove the existing entry, then fall through to append the new one.
+                bounds = find_entry_bounds(text, bottle_name)
+                if bounds:
+                    start, end = bounds
+                    text = text[:start] + text[end:]
+                    path.write_text(text)
+
+            entry = entry_content(type_, bottle_name, args)
+            text = path.read_text()
+            path.write_text(text.rstrip() + "\n\n---\n" + entry + "---\n")
+        return json.dumps({
+            "ok": True,
+            "file": str(path),
+            "producer": producer,
+            "name": bottle_name,
+            "overwrote": overwrite and bottle_name in existing_names,
+        })
 
     if name == "update_bottle":
-        type_ = args["type"].lower()
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         path = producer_path(type_, args["producer"])
         if not path.exists():
             return json.dumps({"error": f"No note found for '{args['producer']}'"})
-        text = path.read_text()
-        bounds = find_entry_bounds(text, args["name"])
-        if not bounds:
-            return json.dumps({"error": f"No entry found matching '{args['name']}'"})
 
-        start, end = bounds
-        section = text[start:end]
-        field, value = args["field"], args["value"]
+        with _file_lock(path):
+            text = path.read_text()
+            bounds = find_entry_bounds(text, args["name"])
+            if not bounds:
+                return json.dumps({"error": f"No entry found matching '{args['name']}'"})
 
-        # Case-insensitive match against the type's body markers. If the
-        # field matches, route to update_body_section using the canonical
-        # marker casing (e.g. "Food pairings", not "Food Pairings" — title()
-        # would mangle multi-word markers). Otherwise treat as an inline
-        # Dataview field (`field:: value`).
-        append = bool(args.get("append", False))
-        body_markers = BODY_SECTIONS.get(type_, [])
-        marker = next((m for m in body_markers if m.lower() == field.lower()), None)
-        if marker:
-            section = update_body_section(section, marker, value, append=append)
-        else:
-            section = update_inline_field(section, field, value, append=append)
+            start, end = bounds
+            section = text[start:end]
+            field, value = args["field"], args["value"]
 
-        path.write_text(text[:start] + section + text[end:])
+            # Case-insensitive match against the type's body markers. If the
+            # field matches, route to update_body_section using the canonical
+            # marker casing (e.g. "Food pairings", not "Food Pairings" — title()
+            # would mangle multi-word markers). Otherwise treat as an inline
+            # Dataview field (`field:: value`).
+            append = bool(args.get("append", False))
+            body_markers = BODY_SECTIONS.get(type_, [])
+            marker = next((m for m in body_markers if m.lower() == field.lower()), None)
+            if marker:
+                section = update_body_section(section, marker, value, append=append)
+            else:
+                section = update_inline_field(section, field, value, append=append)
+
+            path.write_text(text[:start] + section + text[end:])
         return json.dumps({"ok": True, "field": field, "value": value})
 
     if name == "delete_bottle":
-        type_ = args["type"].lower()
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         path = producer_path(type_, args["producer"])
         if not path.exists():
             return json.dumps({"error": f"No note found for '{args['producer']}'"})
-        text = path.read_text()
-        bounds = find_entry_bounds(text, args["name"])
-        if not bounds:
-            return json.dumps({"error": f"No entry found matching '{args['name']}'"})
-        start, end = bounds
-        path.write_text(text[:start] + text[end:])
+        with _file_lock(path):
+            text = path.read_text()
+            bounds = find_entry_bounds(text, args["name"])
+            if not bounds:
+                return json.dumps({"error": f"No entry found matching '{args['name']}'"})
+            start, end = bounds
+            path.write_text(text[:start] + text[end:])
         return json.dumps({
             "ok": True,
             "removed_bottle": args["name"],
@@ -472,11 +634,13 @@ def _dispatch(name: str, args: dict) -> str:
         })
 
     if name == "delete_producer":
-        type_ = args["type"].lower()
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         path = producer_path(type_, args["producer"])
         if not path.exists():
             return json.dumps({"error": f"No note found for '{args['producer']}'"})
-        path.unlink()
+        with _file_lock(path):
+            path.unlink()
         return json.dumps({
             "ok": True,
             "deleted_producer": args["producer"],
@@ -485,36 +649,99 @@ def _dispatch(name: str, args: dict) -> str:
         })
 
     if name == "rate_bottle":
-        type_ = args["type"].lower()
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         path = producer_path(type_, args["producer"])
         if not path.exists():
             return json.dumps({"error": f"No note found for '{args['producer']}'"})
-        text = path.read_text()
-        bounds = find_entry_bounds(text, args["name"])
-        if not bounds:
-            return json.dumps({"error": f"No entry found matching '{args['name']}'"})
 
-        start, end = bounds
-        section = text[start:end]
-        section = update_inline_field(section, "rating", str(args["rating"]))
-        section = update_inline_field(section, "date_tasted", args.get("date_tasted") or get_local_date())
-        if args.get("would_buy_again"):
-            section = update_inline_field(section, "would_buy_again", args["would_buy_again"])
+        with _file_lock(path):
+            text = path.read_text()
+            bounds = find_entry_bounds(text, args["name"])
+            if not bounds:
+                return json.dumps({"error": f"No entry found matching '{args['name']}'"})
 
-        path.write_text(text[:start] + section + text[end:])
+            start, end = bounds
+            section = text[start:end]
+            section = update_inline_field(section, "rating", str(args["rating"]))
+            section = update_inline_field(section, "date_tasted", args.get("date_tasted") or get_local_date())
+            if args.get("would_buy_again"):
+                section = update_inline_field(section, "would_buy_again", args["would_buy_again"])
+
+            path.write_text(text[:start] + section + text[end:])
         return json.dumps({"ok": True, "rating": args["rating"], "date_tasted": args.get("date_tasted") or get_local_date()})
 
+    if name == "consume_bottle":
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
+        decrement = max(1, int(args.get("decrement", 1)))
+        path = producer_path(type_, args["producer"])
+        if not path.exists():
+            return json.dumps({"error": f"No note found for '{args['producer']}'"})
+
+        with _file_lock(path):
+            text = path.read_text()
+            bounds = find_entry_bounds(text, args["name"])
+            if not bounds:
+                return json.dumps({"error": f"No entry found matching '{args['name']}'"})
+            start, end = bounds
+            section = text[start:end]
+
+            qty_match = re.search(r'^quantity::\s*(\S*)', section, re.MULTILINE)
+            current_str = qty_match.group(1).strip() if qty_match else ""
+            try:
+                current = int(current_str)
+            except ValueError:
+                current = 0
+
+            new_qty = max(0, current - decrement)
+            section = update_inline_field(section, "quantity", str(new_qty))
+            if new_qty == 0:
+                section = update_inline_field(section, "in_cellar", "false")
+            path.write_text(text[:start] + section + text[end:])
+
+        return json.dumps({
+            "ok": True,
+            "name": args["name"],
+            "previous_quantity": current,
+            "new_quantity": new_qty,
+            "in_cellar": new_qty > 0,
+        })
+
     if name == "get_note":
-        type_ = args["type"].lower()
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         path = producer_path(type_, args["producer"])
         if not path.exists():
             return json.dumps({"error": f"No note found for '{args['producer']}'"})
         return json.dumps({"producer": args["producer"], "type": type_, "content": path.read_text()})
 
+    if name == "get_bottle":
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
+        path = producer_path(type_, args["producer"])
+        if not path.exists():
+            return json.dumps({"error": f"No note found for '{args['producer']}'"})
+        entries = parse_entries(path.read_text())
+        name_q = args["name"].strip().lower()
+        # Prefer exact match (case-insensitive) over substring; on substring,
+        # require unambiguity so the agent doesn't quietly grab the wrong bottle.
+        exact = [e for e in entries if e["_name"].lower() == name_q]
+        if exact:
+            return json.dumps({"type": type_, "producer": args["producer"], "bottle": exact[0]})
+        substr = [e for e in entries if name_q in e["_name"].lower()]
+        if not substr:
+            return json.dumps({"error": f"No bottle matching '{args['name']}'"})
+        if len(substr) > 1:
+            return json.dumps({
+                "error": f"Ambiguous match for '{args['name']}'",
+                "candidates": [e["_name"] for e in substr],
+            })
+        return json.dumps({"type": type_, "producer": args["producer"], "bottle": substr[0]})
+
     if name == "list_producers":
-        type_ = args["type"].lower()
-        if type_ not in VALID_TYPES:
-            return json.dumps({"error": f"Invalid type '{type_}'"})
+        type_, err = _validate_type(args.get("type"))
+        if err: return json.dumps({"error": err})
         dir_ = CELLAR_DIRS[type_]
         if not dir_.exists():
             return json.dumps({"producers": []})
@@ -522,8 +749,15 @@ def _dispatch(name: str, args: dict) -> str:
         return json.dumps({"type": type_, "producers": producers, "count": len(producers)})
 
     if name == "search_cellar":
-        types_to_search = [args["type"].lower()] if args.get("type") else VALID_TYPES
+        if args.get("type"):
+            t, err = _validate_type(args["type"])
+            if err: return json.dumps({"error": err})
+            types_to_search = [t]
+        else:
+            types_to_search = VALID_TYPES
+
         results = []
+        name_q = (args.get("name") or "").strip().lower()
         for type_ in types_to_search:
             dir_ = CELLAR_DIRS.get(type_)
             if not dir_ or not dir_.exists():
@@ -537,6 +771,8 @@ def _dispatch(name: str, args: dict) -> str:
                 except Exception:
                     continue
                 for entry in entries:
+                    if name_q and name_q not in entry.get("_name", "").lower():
+                        continue
                     if args.get("varietal") and args["varietal"].lower() not in entry.get("varietal", "").lower():
                         continue
                     if args.get("vintage") and str(args["vintage"]) != entry.get("vintage", ""):
@@ -550,6 +786,69 @@ def _dispatch(name: str, args: dict) -> str:
                     if args.get("would_buy_again") and entry.get("would_buy_again", "").lower() != args["would_buy_again"].lower():
                         continue
                     results.append({"type": type_, "producer": producer, **entry})
+
+        return json.dumps({"results": results, "count": len(results)})
+
+    if name == "recent_tastings":
+        if args.get("type"):
+            t, err = _validate_type(args["type"])
+            if err: return json.dumps({"error": err})
+            types_to_walk = [t]
+        else:
+            types_to_walk = VALID_TYPES
+        limit = int(args.get("limit", 20))
+
+        bottles = []
+        for type_ in types_to_walk:
+            dir_ = CELLAR_DIRS.get(type_)
+            if not dir_ or not dir_.exists():
+                continue
+            for md_file in dir_.glob("*.md"):
+                try:
+                    entries = parse_entries(md_file.read_text())
+                except Exception:
+                    continue
+                for entry in entries:
+                    date = entry.get("date_tasted", "").strip()
+                    if not date:
+                        continue
+                    bottles.append({"type": type_, "producer": md_file.stem, **entry})
+
+        bottles.sort(key=lambda b: b.get("date_tasted", ""), reverse=True)
+        return json.dumps({
+            "results": bottles[:limit],
+            "returned": min(len(bottles), limit),
+            "total_with_dates": len(bottles),
+        })
+
+    if name == "untasted_bottles":
+        if args.get("type"):
+            t, err = _validate_type(args["type"])
+            if err: return json.dumps({"error": err})
+            types_to_walk = [t]
+        else:
+            types_to_walk = VALID_TYPES
+        in_cellar_only = bool(args.get("in_cellar_only", True))
+
+        results = []
+        for type_ in types_to_walk:
+            dir_ = CELLAR_DIRS.get(type_)
+            if not dir_ or not dir_.exists():
+                continue
+            for md_file in dir_.glob("*.md"):
+                try:
+                    entries = parse_entries(md_file.read_text())
+                except Exception:
+                    continue
+                for entry in entries:
+                    if entry.get("rating", "").strip():
+                        continue
+                    if in_cellar_only:
+                        # Empty defaults to "in cellar" for new bottles; only
+                        # exclude when explicitly false.
+                        if entry.get("in_cellar", "").strip().lower() == "false":
+                            continue
+                    results.append({"type": type_, "producer": md_file.stem, **entry})
 
         return json.dumps({"results": results, "count": len(results)})
 
