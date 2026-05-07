@@ -121,7 +121,20 @@ def main():
 
     time_info = get_time_info()
     date_str = args.date or time_info["date"]
-    timestamp = normalize_timestamp(args.time) if args.time else time_info["timestamp"]
+    if args.time:
+        timestamp = normalize_timestamp(args.time)
+        if timestamp != args.time.strip():
+            # Surface in the gateway log so we can spot agent regressions —
+            # the script silently fixes it, but the agent should be
+            # passing canonical 24-hour HH:MM TZ per the SKILL.
+            print(
+                f"journal-log: normalized non-canonical time "
+                f"{args.time!r} -> {timestamp!r} "
+                f"(agent should pass 24-hour HH:MM TZ, e.g. '13:39 PDT')",
+                file=sys.stderr,
+            )
+    else:
+        timestamp = time_info["timestamp"]
 
     journal_path = get_journal_path(date_str)
     existed = journal_path.exists()
