@@ -143,15 +143,40 @@ def send_signal(message: str) -> bool:
         return False
 
 
+def has_weather_logged(date_str: str) -> bool:
+    """True if the journal for date_str already contains a weather entry.
+
+    Identifies weather entries by the presence of any weather icon emoji
+    (one of WEATHER_ICONS values) in the journal body, or the
+    fallback "⚠️ Weather unavailable" marker.
+    """
+    path = get_journal_path(date_str)
+    if not path.exists():
+        return False
+    text = path.read_text()
+    for icon in set(WEATHER_ICONS.values()):
+        if icon in text:
+            return True
+    return "⚠️ Weather unavailable" in text
+
+
 def main():
     parser = argparse.ArgumentParser(description="Log weather to journal and optionally send via Signal")
     parser.add_argument("--location", help="Location override (default: current from LOCATION.md)")
     parser.add_argument("--date", help="Date YYYY-MM-DD (default: today)")
     parser.add_argument("--no-signal", action="store_true", dest="no_signal", help="Skip Signal message")
+    parser.add_argument("--force", action="store_true", help="Log weather even if today's journal already has a weather entry")
     args = parser.parse_args()
 
     location = args.location or get_current_location()
     date_str = args.date or get_local_date()
+
+    # Idempotency: skip if a weather entry is already present for the day,
+    # unless the caller explicitly asks to force a refresh.
+    if not args.force and has_weather_logged(date_str):
+        print(json.dumps({"date": date_str, "skipped": True, "reason": "weather already logged"}))
+        return
+
     time_info = get_localtime(location=location)
     timestamp = time_info["timestamp"]
 

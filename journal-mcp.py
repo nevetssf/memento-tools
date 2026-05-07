@@ -133,22 +133,25 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="init_journal",
             description=(
-                "Create a journal file (with frontmatter, location, and weather) for the "
-                "given day if it doesn't exist. Default target: TODAY in Steven's local zone.\n\n"
+                "Create a journal file (frontmatter + location) for the given day if it "
+                "doesn't exist. Default target: TODAY in Steven's local zone.\n\n"
                 "FOR RELATIVE DATES (yesterday / tomorrow / N days from now), use `offset_days`. "
                 "DO NOT compute a date string yourself — the system runs in UTC, so any date "
                 "math you do based on the prompt's 'Current time' line will be wrong by one day "
                 "during PDT/MDT evenings. The server resolves `offset_days` against Steven's "
                 "ACTUAL local 'today' via LOCATION.md.\n\n"
+                "Weather: logged automatically only when the target is TODAY (today's weather "
+                "for tomorrow's note would be stale by morning). Pre-creating future dates "
+                "skips weather. The weather logger is idempotent — calling init_journal twice "
+                "on the same day won't double-log. Override with `include_weather=true|false`.\n\n"
                 "Examples:\n"
-                "  init_journal()                                  → today\n"
-                "  init_journal(offset_days=1)                     → tomorrow (local)\n"
-                "  init_journal(offset_days=1, apply_template=true) → tomorrow + seed defaults\n"
-                "  init_journal(offset_days=-1)                    → yesterday\n"
-                "  init_journal(date='2026-05-15')                 → explicit date\n\n"
+                "  init_journal()                                          → today + weather\n"
+                "  init_journal(apply_template=true)                       → today + weather + priorities (morning routine)\n"
+                "  init_journal(offset_days=1, apply_template=true)        → tomorrow + priorities, NO weather\n"
+                "  init_journal(offset_days=-1)                            → yesterday, no weather\n"
+                "  init_journal(date='2026-05-15')                         → explicit date, no weather (not today)\n\n"
                 "If `date` and `offset_days` are both given, `date` wins. `apply_template` "
-                "merges defaults from Templates/Priorities.md after creating the file — "
-                "useful when prepping tomorrow's journal for planning."
+                "merges defaults from Templates/Priorities.md after creating the file."
             ),
             inputSchema={
                 "type": "object",
@@ -162,6 +165,10 @@ async def list_tools() -> list[types.Tool]:
                         "type": "boolean",
                         "default": False,
                         "description": "After creating the file, seed defaults from Templates/Priorities.md."
+                    },
+                    "include_weather": {
+                        "type": "boolean",
+                        "description": "Override the auto-default. Default: true if target is today, false otherwise. Set true to force-log weather for any date; set false to skip weather even on today (e.g. when you'll narrate it in your reply instead)."
                     },
                     "include_signal": {"type": "boolean", "description": "Send weather via Signal as part of init (default: true). Set false if you'll send your own message that already covers the weather."}
                 }
@@ -539,30 +546,41 @@ def _dispatch(name: str, args: dict) -> str:
         # Resolve the target date. Precedence: explicit `date` > offset_days > today.
         # offset_days is computed in Steven's LOCAL zone (system runs in UTC, so
         # we must NOT use the agent's prompt-time math).
+        local_today = jheader.get_local_date()
         if date:
             target_date = date
         elif args.get("offset_days") is not None:
             from datetime import datetime as _dt, timedelta as _td
-            today_local = jheader.get_local_date()
             target_date = (
-                _dt.strptime(today_local, "%Y-%m-%d").date()
+                _dt.strptime(local_today, "%Y-%m-%d").date()
                 + _td(days=int(args["offset_days"]))
             ).isoformat()
         else:
             target_date = None  # let jlog default to today
 
         result = _run(jlog.main, ["--init"] + _date_arg(target_date))
-        # Log weather when a new file is created or frontmatter was just added
-        if "Created" in result or "Added frontmatter" in result:
-            d = target_date or jheader.get_local_date()
+
+        # Weather policy:
+        #   - If `include_weather` is explicitly set, honor it.
+        #   - Otherwise, default to True ONLY when the target date is today
+        #     in Steven's local zone. Pre-creating tomorrow's note (or any
+        #     past/future date) shouldn't log weather — tomorrow's weather
+        #     as of tonight is stale by morning, and past dates would
+        #     incorrectly log run-time weather. journal-weather is idempotent,
+        #     so re-running on the same day is safe.
+        effective_date = target_date or local_today
+        if "include_weather" in args:
+            should_log_weather = bool(args["include_weather"])
+        else:
+            should_log_weather = (effective_date == local_today)
+
+        if should_log_weather:
             signal_arg = [] if args.get("include_signal", True) else ["--no-signal"]
-            _run(jweather.main, signal_arg + _date_arg(d))
+            _run(jweather.main, signal_arg + _date_arg(effective_date))
 
         # Optionally seed default priorities from Templates/Priorities.md
         if args.get("apply_template"):
-            d = target_date or jheader.get_local_date()
-            template_result = _run(jpriorities.main, ["--apply-template"] + _date_arg(d))
-            # Combine: keep init result first, append template summary on a new line
+            template_result = _run(jpriorities.main, ["--apply-template"] + _date_arg(effective_date))
             return result.rstrip() + "\n" + template_result
         return result
 
