@@ -302,6 +302,42 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="delete_bottle",
+            description=(
+                "Remove a single bottle entry from a producer's file. The "
+                "producer file itself is preserved with any other bottles "
+                "intact. Irreversible — use delete_producer to remove the "
+                "entire file instead. The vault is backed up nightly so "
+                "accidental deletes can be recovered from restic."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": type_prop,
+                    "producer": producer_prop,
+                    "name": name_prop,
+                },
+                "required": ["type", "producer", "name"]
+            }
+        ),
+        types.Tool(
+            name="delete_producer",
+            description=(
+                "Delete an entire producer file (and ALL its bottle entries). "
+                "Irreversible — use this only when removing a producer "
+                "wholesale. The vault is backed up nightly so accidental "
+                "deletes can be recovered from restic."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": type_prop,
+                    "producer": producer_prop,
+                },
+                "required": ["type", "producer"]
+            }
+        ),
+        types.Tool(
             name="get_note",
             description="Get the full note for a producer.",
             inputSchema={
@@ -416,6 +452,37 @@ def _dispatch(name: str, args: dict) -> str:
 
         path.write_text(text[:start] + section + text[end:])
         return json.dumps({"ok": True, "field": field, "value": value})
+
+    if name == "delete_bottle":
+        type_ = args["type"].lower()
+        path = producer_path(type_, args["producer"])
+        if not path.exists():
+            return json.dumps({"error": f"No note found for '{args['producer']}'"})
+        text = path.read_text()
+        bounds = find_entry_bounds(text, args["name"])
+        if not bounds:
+            return json.dumps({"error": f"No entry found matching '{args['name']}'"})
+        start, end = bounds
+        path.write_text(text[:start] + text[end:])
+        return json.dumps({
+            "ok": True,
+            "removed_bottle": args["name"],
+            "producer": args["producer"],
+            "type": type_,
+        })
+
+    if name == "delete_producer":
+        type_ = args["type"].lower()
+        path = producer_path(type_, args["producer"])
+        if not path.exists():
+            return json.dumps({"error": f"No note found for '{args['producer']}'"})
+        path.unlink()
+        return json.dumps({
+            "ok": True,
+            "deleted_producer": args["producer"],
+            "type": type_,
+            "file": str(path),
+        })
 
     if name == "rate_bottle":
         type_ = args["type"].lower()
