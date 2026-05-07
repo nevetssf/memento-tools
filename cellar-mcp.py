@@ -132,24 +132,48 @@ def find_entry_bounds(text: str, name: str) -> tuple[int, int] | None:
     return None
 
 
-def update_inline_field(section: str, field: str, value: str) -> str:
-    """Replace or append an inline field in a section."""
-    pattern = rf'^{re.escape(field)}::[ \t]*.*'
-    new_line = f"{field}:: {value}"
-    updated, n = re.subn(pattern, new_line, section, flags=re.MULTILINE)
+def update_inline_field(section: str, field: str, value: str, append: bool = False) -> str:
+    """Replace or set an inline `field:: value` line in a section.
+
+    With `append=True`, the new value is joined to any existing non-empty
+    value with `, ` (list separator) instead of replacing. If the existing
+    value is empty, behaves the same as replace (no stray leading separator).
+    """
+    pattern = rf'^({re.escape(field)}::[ \t]*)(.*)$'
+
+    def _replace(m: re.Match) -> str:
+        prefix, existing = m.group(1), m.group(2).strip()
+        if append and existing:
+            return f"{prefix}{existing}, {value}"
+        return f"{field}:: {value}"
+
+    updated, n = re.subn(pattern, _replace, section, flags=re.MULTILINE)
     if n:
         return updated
-    # Append after last inline field line
+    # Field doesn't exist yet — append a new line after the last inline field.
+    new_line = f"{field}:: {value}"
     last_field = max((m.end() for m in re.finditer(r'^\w+::.*\n?', section, re.MULTILINE)), default=None)
     if last_field:
         return section[:last_field] + new_line + "\n" + section[last_field:]
     return section + new_line + "\n"
 
 
-def update_body_section(section: str, key: str, value: str) -> str:
-    """Replace the value after a **Key:** marker."""
-    pattern = rf'(\*\*{re.escape(key)}:\*\*[ \t]*).*'
-    updated, n = re.subn(pattern, rf'\g<1>{value}', section, flags=re.MULTILINE)
+def update_body_section(section: str, key: str, value: str, append: bool = False) -> str:
+    """Replace or set the value after a `**Key:**` marker.
+
+    With `append=True`, the new value is joined to any existing non-empty
+    value with ` — ` (em dash) instead of replacing. If the existing value
+    is empty, behaves the same as replace.
+    """
+    pattern = rf'(\*\*{re.escape(key)}:\*\*[ \t]*)(.*)'
+
+    def _replace(m: re.Match) -> str:
+        prefix, existing = m.group(1), m.group(2).strip()
+        if append and existing:
+            return f"{prefix}{existing} — {value}"
+        return f"{prefix}{value}"
+
+    updated, n = re.subn(pattern, _replace, section, flags=re.MULTILINE)
     return updated if n else section
 
 
@@ -236,15 +260,27 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="update_bottle",
-            description="Update a specific field in an existing bottle entry.",
+            description=(
+                "Update a specific field in an existing bottle entry. "
+                "Default: replace the existing value. With `append=true`, "
+                "join the new value to the existing one (` — ` for body "
+                "sections like Notes/Nose/Palate; `, ` for inline list "
+                "fields like botanicals). Useful for accumulating tasting "
+                "notes across sessions without losing prior impressions."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "type": type_prop,
                     "producer": producer_prop,
                     "name": name_prop,
-                    "field": {"type": "string", "description": "Field name — inline (varietal, vintage, nose, palate, finish, rating, etc.) or body section (Nose, Palate, Finish, etc.)"},
+                    "field": {"type": "string", "description": "Field name — inline (varietal, vintage, abv, botanicals, etc.) or body marker (Nose, Palate, Finish, Notes, Color, Appearance, Food pairings, With water)"},
                     "value": {"type": "string"},
+                    "append": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Append to existing value with a sensible separator. Use for tasting notes / list-shaped fields. Skip for scalar fields (rating, vintage, abv) — those should be replaced."
+                    },
                 },
                 "required": ["type", "producer", "name", "field", "value"]
             }
@@ -370,12 +406,13 @@ def _dispatch(name: str, args: dict) -> str:
         # marker casing (e.g. "Food pairings", not "Food Pairings" — title()
         # would mangle multi-word markers). Otherwise treat as an inline
         # Dataview field (`field:: value`).
+        append = bool(args.get("append", False))
         body_markers = BODY_SECTIONS.get(type_, [])
         marker = next((m for m in body_markers if m.lower() == field.lower()), None)
         if marker:
-            section = update_body_section(section, marker, value)
+            section = update_body_section(section, marker, value, append=append)
         else:
-            section = update_inline_field(section, field, value)
+            section = update_inline_field(section, field, value, append=append)
 
         path.write_text(text[:start] + section + text[end:])
         return json.dumps({"ok": True, "field": field, "value": value})
