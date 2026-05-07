@@ -70,12 +70,14 @@ CREATE TABLE IF NOT EXISTS bottles (
     abv             TEXT,
     cask_type       TEXT,
     botanicals      TEXT,
+    terroir         TEXT,
     price           TEXT,
     acquired_date   TEXT,
     status          TEXT NOT NULL DEFAULT 'in-cellar'
                        CHECK (status IN ('wishlist','acquired','in-cellar','consumed','gifted')),
     quantity        INTEGER NOT NULL DEFAULT 1,
     would_buy_again INTEGER,
+    rating          INTEGER CHECK (rating IS NULL OR (rating >= 0 AND rating <= 100)),
     notes           TEXT,
     obsidian_file   TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -256,8 +258,8 @@ def delete_producer(con: sqlite3.Connection, name_or_id: str | int) -> int:
 
 BOTTLE_FIELDS = {
     "name", "type", "expression", "style", "varietal", "vintage",
-    "age", "abv", "cask_type", "botanicals", "price",
-    "acquired_date", "status", "quantity", "would_buy_again",
+    "age", "abv", "cask_type", "botanicals", "terroir", "price",
+    "acquired_date", "status", "quantity", "would_buy_again", "rating",
     "notes", "obsidian_file",
 }
 
@@ -328,6 +330,12 @@ def add_bottle(con: sqlite3.Connection, producer: str | int, name: str, type_: s
     # Coerce booleans to 0/1
     if "would_buy_again" in fields and fields["would_buy_again"] is not None:
         fields["would_buy_again"] = 1 if fields["would_buy_again"] else 0
+    # Validate rating range
+    if "rating" in fields and fields["rating"] is not None:
+        r = int(fields["rating"])
+        if not (0 <= r <= 100):
+            raise ValueError("rating must be 0-100 (or null)")
+        fields["rating"] = r
 
     # Build INSERT
     cols = ["producer_id", "name", "type"] + [k for k in fields if k in BOTTLE_FIELDS - {"name", "type"}]
@@ -346,6 +354,11 @@ def update_bottle(con: sqlite3.Connection, name_or_id: str | int, **fields) -> i
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
     if "would_buy_again" in fields and fields["would_buy_again"] is not None:
         fields["would_buy_again"] = 1 if fields["would_buy_again"] else 0
+    if "rating" in fields and fields["rating"] is not None:
+        r = int(fields["rating"])
+        if not (0 <= r <= 100):
+            raise ValueError("rating must be 0-100 (or null)")
+        fields["rating"] = r
     cols = [k for k in fields if k in BOTTLE_FIELDS]
     if not cols:
         return 0
