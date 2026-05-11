@@ -51,7 +51,7 @@ def hour_label(time_str: str) -> str:
 
 def get_weather(location: str) -> str | None:
     """Fetch detailed weather from wttr.in JSON API. Returns formatted multi-line string."""
-    loc = location.replace(' ', '+').replace(',', '')
+    loc = location.replace(' ', '+')
     try:
         result = subprocess.run(
             f'curl -s "wttr.in/{loc}?format=j1"',
