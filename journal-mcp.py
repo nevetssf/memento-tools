@@ -383,6 +383,11 @@ async def list_tools() -> list[types.Tool]:
         ),
         # --- journal-location ---
         types.Tool(
+            name="get_location",
+            description="Get Steven's current location (the home base used for timezone, weather, and journal frontmatter).",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
             name="set_location",
             description="Update Steven's current location: writes to LOCATION.md (drives timezone), appends to today's journal frontmatter, logs weather, and sends a Signal message.",
             inputSchema={
@@ -678,6 +683,9 @@ def _dispatch(name: str, args: dict) -> str:
         return _run(jweather.main, argv)
 
     # --- journal-location ---
+    elif name == "get_location":
+        return json.dumps({"location": LOCATION_MD.read_text().strip()})
+
     elif name == "set_location":
         location = args["location"]
         LOCATION_MD.write_text(location + "\n")
