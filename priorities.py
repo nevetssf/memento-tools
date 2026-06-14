@@ -78,19 +78,12 @@ def _parse_iso_date(s: str) -> _date:
 
 @contextlib.contextmanager
 def _file_lock(path: Path):
-    """Exclusive flock on a sidecar `.lock` file next to the target.
-
-    Same pattern as chat_signal.py: lock applies even if the file doesn't
-    exist yet, since we lock the sidecar.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    with open(lock_path, "w") as lockf:
-        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+    """Exclusive flock on the target file itself. Callers ensure the file
+    exists before entering this context (each cmd_* checks `path.exists()`
+    and errors otherwise), so no sidecar is needed."""
+    with open(path, "r+") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
 
 
 # ---------------------------------------------------------------------------

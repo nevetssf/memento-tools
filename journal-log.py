@@ -9,6 +9,7 @@ If --time is omitted, it uses the current local time.
 """
 
 import argparse
+import fcntl
 import re
 import subprocess
 import sys
@@ -137,13 +138,40 @@ def main():
         timestamp = time_info["timestamp"]
 
     journal_path = get_journal_path(date_str)
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
     existed = journal_path.exists()
-    had_frontmatter = existed and journal_path.read_text().startswith("---")
-    ensure_frontmatter(journal_path, date_str)
+    if not existed:
+        journal_path.touch()
+
+    # Exclusive flock for the read-modify-write of the journal body. Blocks
+    # across processes — important because cron jobs (priorities-rollover,
+    # journal-header subprocesses) can race with this write.
+    entry_index = 0
+    with open(journal_path, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        content = f.read()
+        had_frontmatter = content.startswith("---")
+        if not had_frontmatter:
+            template = f"---\ndate: {date_str}\nday: {day_of_week(date_str)}\ntags: []\npeople: []\n---\n"
+            sep = "\n" if content and not content.startswith("\n") else ""
+            content = template + sep + content
+
+        if not args.init:
+            entry_text = f"## {timestamp}\n{args.entry}"
+            new_minutes = parse_time_minutes(timestamp)
+            if new_minutes is not None:
+                content = insert_chronologically(content, entry_text, new_minutes)
+            else:
+                content = content.rstrip("\n") + "\n\n" + entry_text + "\n"
+            entry_index = len(re.findall(r'^## \d{1,2}:\d{2}\b', content, re.MULTILINE))
+
+        f.seek(0)
+        f.truncate()
+        f.write(content)
 
     if not had_frontmatter:
         subprocess.run(
-            ["python3", str(Path(__file__).parent / "journal-location.py"), "--date", date_str, "--init"],
+            [sys.executable, str(Path(__file__).parent / "journal-location.py"), "--date", date_str, "--init"],
             capture_output=True, text=True, timeout=10
         )
 
@@ -156,34 +184,26 @@ def main():
             print(f"Already exists: {journal_path}")
         return
 
-    entry_text = f"## {timestamp}\n{args.entry}"
-    new_minutes = parse_time_minutes(timestamp)
-
-    if new_minutes is not None and journal_path.stat().st_size > 0:
-        journal_path.write_text(insert_chronologically(journal_path.read_text(), entry_text, new_minutes))
-    else:
-        with open(journal_path, "a") as f:
-            f.write("\n" + entry_text + "\n")
-
     header_script = Path(__file__).parent / "journal-header.py"
 
     if args.people:
         for person_spec in args.people:
             if ":" in person_spec:
                 name, pid = person_spec.rsplit(":", 1)
-                cmd = ["python3", str(header_script), "--date", date_str, "--add-person", name, "--person-id", pid]
+                cmd = [sys.executable, str(header_script), "--date", date_str, "--add-person", name, "--person-id", pid]
             else:
-                cmd = ["python3", str(header_script), "--date", date_str, "--add-person", person_spec]
+                cmd = [sys.executable, str(header_script), "--date", date_str, "--add-person", person_spec]
             subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
     if args.tags:
         for tag in args.tags:
             subprocess.run(
-                ["python3", str(header_script), "--date", date_str, "--add-tag", tag],
+                [sys.executable, str(header_script), "--date", date_str, "--add-tag", tag],
                 capture_output=True, text=True, timeout=10
             )
 
-    print(f"Logged — {timestamp}")
+    char_count = len(args.entry)
+    print(f"Logged — {timestamp} · {journal_path.name} · entry #{entry_index} · {char_count} chars")
 
 
 if __name__ == "__main__":

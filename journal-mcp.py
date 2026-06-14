@@ -57,8 +57,8 @@ LOCATION_MD = LOCATION_FILE
 def _run(main_fn, argv: list[str]) -> str:
     """Run a script's main() with argv, capturing stdout/stderr.
 
-    Handles sys.exit(0) (success with output, e.g. priorities.py) and
-    sys.exit(1) (error — return stderr JSON message).
+    Success (normal return or sys.exit(0)) returns stdout — empty is OK.
+    Failure (non-zero exit) returns "Error: " + stderr.
     """
     old_argv = sys.argv[:]
     sys.argv = ["script"] + argv
@@ -69,11 +69,10 @@ def _run(main_fn, argv: list[str]) -> str:
             main_fn()
         return buf_out.getvalue().strip()
     except SystemExit as e:
-        out = buf_out.getvalue().strip()
-        if e.code == 0 and out:
-            return out
+        if e.code == 0:
+            return buf_out.getvalue().strip()
         err = buf_err.getvalue().strip()
-        return err if err else json.dumps({"error": "Command failed"})
+        return f"Error: {err}" if err else "Error: command failed"
     finally:
         sys.argv = old_argv
 
@@ -524,7 +523,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     try:
         result = _dispatch(name, arguments)
     except BaseException as e:
-        result = json.dumps({"error": str(e)})
+        result = f"Error: {e}"
     return [types.TextContent(type="text", text=result)]
 
 

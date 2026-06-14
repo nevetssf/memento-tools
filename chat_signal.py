@@ -121,7 +121,9 @@ def get_path(date=None) -> str:
 
 
 def _ensure_file(path: Path, d: _date) -> None:
-    if path.exists():
+    # File-size check (not just existence) because _file_lock touches the
+    # file before locking, so an empty file may exist with no frontmatter.
+    if path.exists() and path.stat().st_size > 0:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     frontmatter = (
@@ -136,20 +138,14 @@ def _ensure_file(path: Path, d: _date) -> None:
 
 @contextlib.contextmanager
 def _file_lock(file_path: Path):
-    """Exclusive flock via a sidecar `.lock` file.
-
-    Serializes concurrent writers to the same chat-file. The chat hook can fire
-    quickly for back-to-back messages (e.g. a media + caption pair from Signal)
-    and we don't want one writer's read/modify/write to clobber another's.
-    """
+    """Exclusive flock on the chat file itself. Touches the file if missing
+    so the caller (_ensure_file) can populate frontmatter inside the lock."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = file_path.with_suffix(file_path.suffix + ".lock")
-    with open(lock_path, "w") as lockf:
-        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+    if not file_path.exists():
+        file_path.touch()
+    with open(file_path, "r+") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
 
 
 # ---------- Slug + attachment handling ------------------------------------
