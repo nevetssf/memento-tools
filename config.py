@@ -56,12 +56,12 @@ EMBED_DB_PATH = Path(os.environ.get("MEMENTO_EMBED_DB_PATH",
     str(Path.home() / "obsidian-vault-index" / "vault-embed.db")))
 
 # Embedding model endpoint (OpenAI-compatible /v1/embeddings)
-EMBED_MODEL_URL = os.environ.get("MEMENTO_EMBED_MODEL_URL", "http://192.168.6.19:1234/v1")
+EMBED_MODEL_URL = os.environ.get("MEMENTO_EMBED_MODEL_URL", "http://dgx-spark:1234/v1")
 EMBED_MODEL_NAME = os.environ.get("MEMENTO_EMBED_MODEL_NAME", "text-embedding-qwen3-embedding-4b")
 EMBED_DIMS = int(os.environ.get("MEMENTO_EMBED_DIMS", "2560"))
 
 # Chat model endpoint for chunking / metadata extraction / reranking
-CHAT_MODEL_URL = os.environ.get("MEMENTO_CHAT_MODEL_URL", "http://192.168.6.19:1234/v1")
+CHAT_MODEL_URL = os.environ.get("MEMENTO_CHAT_MODEL_URL", "http://dgx-spark:1234/v1")
 CHAT_MODEL_NAME = os.environ.get("MEMENTO_CHAT_MODEL_NAME", "qwen3.6-35b-a3b@q8_k_xl")
 # Optional bearer token. LM Studio doesn't require auth; vLLM does.
 CHAT_MODEL_API_KEY = os.environ.get("MEMENTO_CHAT_MODEL_API_KEY", "")

@@ -97,10 +97,10 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_LOCATION_FILE` | `~/.openclaw/workspace/LOCATION.md` | Current city/state |
 | `MEMENTO_SOUL_FILE` | `~/.openclaw/workspace/SOUL.md` | Agent persona file |
 | `MEMENTO_EMBED_DB_PATH` | `~/obsidian-vault-index/vault-embed.db` | Vector index |
-| `MEMENTO_EMBED_MODEL_URL` | `http://192.168.6.19:1234/v1` | Embedding endpoint (LM Studio / vLLM) |
+| `MEMENTO_EMBED_MODEL_URL` | `http://dgx-spark:1234/v1` | Embedding endpoint (LM Studio / vLLM) |
 | `MEMENTO_EMBED_MODEL_NAME` | `text-embedding-qwen3-embedding-4b` | Embedding model |
 | `MEMENTO_EMBED_DIMS` | `2560` | Vector dimensions |
-| `MEMENTO_CHAT_MODEL_URL` | `http://192.168.6.19:1234/v1` | Chat LLM endpoint |
+| `MEMENTO_CHAT_MODEL_URL` | `http://dgx-spark:1234/v1` | Chat LLM endpoint |
 | `MEMENTO_CHAT_MODEL_NAME` | `qwen3.6-35b-a3b@q8_k_xl` | Chat LLM (used for metadata extraction & distillation) |
 | `MEMENTO_SIGNAL_TARGET` | (empty) | Signal UUID for notifications (e.g. `uuid:...`) |
 | `MEMENTO_TODOIST_TOKEN` | (empty) | Todoist API token (https://todoist.com/app/settings/integrations/developer) |
