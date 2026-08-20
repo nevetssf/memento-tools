@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from journal_fm import get_current_location, get_local_date, get_journal_path
 from localtime import get_localtime
 from config import LOCATION_FILE, SIGNAL_TARGET
+from weather_query import wttr_location
 
 WEATHER_ICONS = {
     "113": "☀️", "116": "⛅", "119": "☁️", "122": "☁️",
@@ -51,7 +52,7 @@ def hour_label(time_str: str) -> str:
 
 def get_weather(location: str) -> str | None:
     """Fetch detailed weather from wttr.in JSON API. Returns formatted multi-line string."""
-    loc = location.replace(' ', '+')
+    loc = wttr_location(location)
     try:
         result = subprocess.run(
             f'curl -s "wttr.in/{loc}?format=j1"',

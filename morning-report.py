@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import LOCATION_FILE, SIGNAL_TARGET
+from weather_query import wttr_location
 
 def get_location():
     """Read current location from LOCATION.md."""
@@ -16,7 +17,7 @@ def get_location():
             return loc
     except Exception as e:
         print(f"Error reading location: {e}", file=sys.stderr)
-    return "San Francisco, CA"
+    return "San Francisco, CA, USA"
 
 def get_local_time(location):
     """Get local time for the location."""
@@ -35,7 +36,7 @@ def get_local_time(location):
 def get_weather(location):
     """Get weather for the location."""
     try:
-        location_formatted = location.replace(' ', '+')
+        location_formatted = wttr_location(location)
         cmd = f'curl -s "wttr.in/{location_formatted}?format=%l:+%c+%t+(feels+like+%f),+%w+wind,+%h+humidity"'
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
         if result.returncode == 0 and result.stdout:
