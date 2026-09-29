@@ -6,7 +6,6 @@ Run with: python3 -m pytest tests/ -v
       or: python3 -m unittest tests/test_priorities.py -v
 """
 
-import json
 import sys
 import tempfile
 import unittest
@@ -128,6 +127,10 @@ class TestParseItems(unittest.TestCase):
         section = "## Priorities\n- [ ] Real task\nsome random line\n- [x] Done\n"
         items = P.parse_items(section)
         self.assertEqual(items, [(False, "Real task"), (True, "Done")])
+
+    def test_strips_label_whitespace(self):
+        section = "## Priorities\n- [ ]   Task with spaces   \n"
+        self.assertEqual(P.parse_items(section), [(False, "Task with spaces")])
 
     def test_label_with_special_chars(self):
         section = "## Priorities\n- [ ] Buy milk & eggs (store)\n"
@@ -418,44 +421,47 @@ class TestContentIntegrity(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # priorities-rollover: get_incomplete_priorities
 # ---------------------------------------------------------------------------
+# priorities.read_priorities — the rollover's source of incomplete items
+# ---------------------------------------------------------------------------
 
-class TestGetIncompletePriorities(unittest.TestCase):
+class TestReadPriorities(unittest.TestCase):
+    """Covers what priorities-rollover feeds on.
+
+    Until 0b7596a this lived in priorities-rollover.get_incomplete_priorities();
+    the rollover now derives the same list from priorities.read_priorities().
+    """
 
     def _write(self, tmp_path, content):
         p = tmp_path / "test.md"
         p.write_text(content)
         return p
 
+    def _incomplete(self, path):
+        """Mirror of the expression priorities-rollover.main() uses."""
+        return [label for done, label in P.read_priorities(path) if not done]
+
     def test_finds_unchecked(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._write(Path(tmp), "## Priorities\n- [ ] Task A\n- [x] Done\n- [ ] Task B\n")
-            result = PR.get_incomplete_priorities(p)
-            self.assertEqual(result, ["Task A", "Task B"])
+            self.assertEqual(self._incomplete(p), ["Task A", "Task B"])
 
     def test_ignores_checked(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._write(Path(tmp), "## Priorities\n- [x] All done\n")
-            self.assertEqual(PR.get_incomplete_priorities(p), [])
+            self.assertEqual(self._incomplete(p), [])
 
     def test_missing_file_returns_empty(self):
-        result = PR.get_incomplete_priorities(Path("/tmp/nonexistent.md"))
-        self.assertEqual(result, [])
+        self.assertEqual(self._incomplete(Path("/tmp/nonexistent-priorities.md")), [])
 
     def test_no_priorities_section_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._write(Path(tmp), FRONTMATTER + ENTRY)
-            self.assertEqual(PR.get_incomplete_priorities(p), [])
+            self.assertEqual(self._incomplete(p), [])
 
-    def test_strips_label_whitespace(self):
+    def test_reports_done_state(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p = self._write(Path(tmp), "- [ ]   Task with spaces   \n")
-            result = PR.get_incomplete_priorities(p)
-            self.assertEqual(result, ["Task with spaces"])
-
-
-# ---------------------------------------------------------------------------
-# priorities-rollover: deduplication logic
-# ---------------------------------------------------------------------------
+            p = self._write(Path(tmp), "## Priorities\n- [x] Done\n- [ ] Pending\n")
+            self.assertEqual(P.read_priorities(p), [(True, "Done"), (False, "Pending")])
 
 class TestRolloverDeduplication(unittest.TestCase):
 
@@ -493,38 +499,14 @@ class TestRolloverDeduplication(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# priorities-rollover: get_existing_priorities
+# priorities-rollover: module surface
 # ---------------------------------------------------------------------------
 
-class TestGetExistingPriorities(unittest.TestCase):
+class TestRolloverModuleSurface(unittest.TestCase):
+    """Guard against tests drifting from the module (see 0b7596a)."""
 
-    def test_returns_incomplete_tasks_only(self):
-        mock_output = json.dumps({"priorities": [
-            {"task": "Done task", "done": True},
-            {"task": "Pending task", "done": False},
-        ]})
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=mock_output)
-            result = PR.get_existing_priorities("2026-03-29")
-        self.assertEqual(result, ["Pending task"])
-
-    def test_returns_empty_on_script_failure(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="")
-            result = PR.get_existing_priorities("2026-03-29")
-        self.assertEqual(result, [])
-
-    def test_returns_empty_on_invalid_json(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="not json")
-            result = PR.get_existing_priorities("2026-03-29")
-        self.assertEqual(result, [])
-
-    def test_returns_empty_on_no_priorities_key(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"date": "2026-03-29"}))
-            result = PR.get_existing_priorities("2026-03-29")
-        self.assertEqual(result, [])
+    def test_exposes_main(self):
+        self.assertTrue(callable(PR.main))
 
 
 if __name__ == "__main__":

@@ -226,7 +226,11 @@ class TestGetReciprocal(PeopleTestCase):
         self.assertEqual(P.get_reciprocal(c, 0, "pet"), "owner")
         self.assertEqual(P.get_reciprocal(c, 0, "owner"), "pet")
         self.assertEqual(P.get_reciprocal(c, 0, "accountant"), "client")
-        self.assertEqual(P.get_reciprocal(c, 0, "step-parent"), "step-child")
+        # "step-parent" is deliberately not a relationship type: step-relations are
+        # modelled as a `parent` link with a qualifier, so unknown types fall through
+        # RECIPROCALS and return None (add_relationship rejects them earlier).
+        self.assertIsNone(P.get_reciprocal(c, 0, "step-parent"))
+        self.assertNotIn("step-parent", P.VALID_TYPES)
 
     def test_boyfriend_male_person(self):
         pid = self.add_person("Bob", "M")
