@@ -2,7 +2,9 @@
 vault_embed.py — Obsidian vault semantic search index.
 
 Builds and queries a local SQLite index of vault contents with:
-  - Qwen3-Embedding-4B (2560-dim vectors via sqlite-vec)
+  - Vectors via sqlite-vec from the configured embedding model (EMBED_MODEL_NAME /
+    EMBED_DIMS; default voyage-4-nano @ 1024 from the local embed-server.py). The index
+    records which model built it; switching models requires `--reembed`.
   - SQLite FTS5 for keyword fallback
   - Hybrid chunking (heading-based + LLM distillation for long sections)
   - LLM metadata extraction (people, topics, action items)
@@ -101,6 +103,12 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
     VALUES (new.id, new.content, new.heading);
 END;
 
+-- Index identity: which embedding model/dims produced the vectors in `embeddings`.
+CREATE TABLE IF NOT EXISTS index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunks_file   ON chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_files_section ON files(section);
 CREATE INDEX IF NOT EXISTS idx_files_date    ON files(date);
@@ -123,6 +131,69 @@ def connect():
 
 
 # ---------------------------------------------------------------------------
+# Index identity — vectors from different models are not comparable
+# ---------------------------------------------------------------------------
+
+CURRENT_IDENTITY = f"{EMBED_MODEL_NAME}@{EMBED_DIMS}"
+
+
+def _meta_get(con: sqlite3.Connection, key: str) -> str | None:
+    row = con.execute("SELECT value FROM index_meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _meta_set(con: sqlite3.Connection, key: str, value: str | None) -> None:
+    if value is None:
+        con.execute("DELETE FROM index_meta WHERE key=?", (key,))
+    else:
+        con.execute("INSERT INTO index_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def _table_dims(con: sqlite3.Connection) -> int | None:
+    """Vector width the `embeddings` vec0 table was created with."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='embeddings'"
+    ).fetchone()
+    m = re.search(r"FLOAT\[(\d+)\]", row[0] if row else "", re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def index_identity(con: sqlite3.Connection) -> str | None:
+    """`model@dims` that built the vectors, or None if unknown.
+
+    Indexes from before identity tracking have no record; if the table width matches
+    the configured dims we adopt the current model (the best available guess) and
+    record it, otherwise the index is unknown and needs --reembed.
+    """
+    ident = _meta_get(con, "embed_identity")
+    if (ident is None and _meta_get(con, "reembed_target") is None
+            and _table_dims(con) == EMBED_DIMS):
+        _meta_set(con, "embed_identity", CURRENT_IDENTITY)
+        con.commit()
+        ident = CURRENT_IDENTITY
+    return ident
+
+
+def check_index_identity(con: sqlite3.Connection, *, allow_partial: bool = False) -> None:
+    """Raise if the index vectors weren't made by the configured model.
+
+    allow_partial: also accept an in-progress --reembed toward the configured model
+    (search can use the chunks done so far; indexing must wait for it to finish).
+    """
+    ident = index_identity(con)
+    if ident == CURRENT_IDENTITY:
+        return
+    if allow_partial and _meta_get(con, "reembed_target") == CURRENT_IDENTITY:
+        return
+    raise RuntimeError(
+        f"Index vectors were built with {ident or 'an unknown model'} "
+        f"({_table_dims(con)} dims) but the configured model is {CURRENT_IDENTITY}. "
+        f"Run `vault_embed.py --reembed` to rebuild the vectors."
+    )
+
+
+# ---------------------------------------------------------------------------
 # LM Studio HTTP clients
 # ---------------------------------------------------------------------------
 
@@ -139,23 +210,49 @@ def _post_json(url: str, body: dict, timeout: int = 120, api_key: str = "") -> d
         return json.loads(resp.read().decode("utf-8"))
 
 
-def embed(text: str) -> list[float]:
-    """Embed a single text. Returns 2560-dim vector."""
+def embed(text: str, input_type: str = "query") -> list[float]:
+    """Embed a single text (a search query by default). Returns an EMBED_DIMS vector.
+
+    `input_type` follows the Voyage API: retrieval models embed queries and documents
+    with different prompts. Servers without the field (LM Studio) ignore it.
+    """
     data = _post_json(
         f"{EMBED_MODEL_URL}/embeddings",
-        {"model": EMBED_MODEL_NAME, "input": text},
+        {"model": EMBED_MODEL_NAME, "input": text, "input_type": input_type},
     )
     return data["data"][0]["embedding"]
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
-    """Embed multiple texts in one request."""
+def embed_batch(texts: list[str], input_type: str = "document") -> list[list[float]]:
+    """Embed multiple texts (documents by default) in one request."""
     data = _post_json(
         f"{EMBED_MODEL_URL}/embeddings",
-        {"model": EMBED_MODEL_NAME, "input": texts},
+        {"model": EMBED_MODEL_NAME, "input": texts, "input_type": input_type},
         timeout=300,
     )
     return [item["embedding"] for item in data["data"]]
+
+
+class ChatUnreachable(RuntimeError):
+    """The chat model endpoint could not be reached (down, network, timeout).
+
+    Distinct from the model answering badly: callers must not turn this into empty
+    metadata, which is stored permanently — leave chunks pending for a later run.
+    """
+
+
+def chat_model_unreachable(timeout: int = 10) -> str | None:
+    """Quick reachability probe of CHAT_MODEL_URL. Returns an error string, or None if
+    the server answered (any HTTP status counts as reachable)."""
+    headers = {"Authorization": f"Bearer {CHAT_MODEL_API_KEY}"} if CHAT_MODEL_API_KEY else {}
+    req = urllib.request.Request(f"{CHAT_MODEL_URL}/models", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return None
+    except urllib.error.HTTPError:
+        return None
+    except (urllib.error.URLError, OSError) as e:
+        return f"chat model unreachable at {CHAT_MODEL_URL}: {getattr(e, 'reason', e)}"
 
 
 def chat(prompt: str, system: str = "", temperature: float = 0.3, max_tokens: int = 500) -> str:
@@ -169,18 +266,24 @@ def chat(prompt: str, system: str = "", temperature: float = 0.3, max_tokens: in
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    data = _post_json(
-        f"{CHAT_MODEL_URL}/chat/completions",
-        {
-            "model": CHAT_MODEL_NAME,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
-        timeout=300,
-        api_key=CHAT_MODEL_API_KEY,
-    )
+    try:
+        data = _post_json(
+            f"{CHAT_MODEL_URL}/chat/completions",
+            {
+                "model": CHAT_MODEL_NAME,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            timeout=300,
+            api_key=CHAT_MODEL_API_KEY,
+        )
+    except urllib.error.HTTPError:
+        raise  # server answered — a model/request problem, not an outage
+    except (urllib.error.URLError, OSError) as e:
+        raise ChatUnreachable(f"chat model unreachable at {CHAT_MODEL_URL}: "
+                              f"{getattr(e, 'reason', e)}") from e
     return data["choices"][0]["message"]["content"].strip()
 
 
@@ -485,6 +588,8 @@ def extract_metadata(chunk_text: str) -> dict:
         out = chat(chunk_text, system=METADATA_SYSTEM, temperature=0.0, max_tokens=300)
         out = re.sub(r"^```(?:json)?\n?|\n?```$", "", out.strip(), flags=re.MULTILINE)
         return json.loads(out)
+    except ChatUnreachable:
+        raise
     except Exception:
         return dict(EMPTY_METADATA)
 
@@ -506,6 +611,8 @@ def extract_metadata_batch(chunk_texts: list[str], max_batch_size: int = 8) -> l
             if isinstance(parsed, list) and len(parsed) == len(batch):
                 results.extend(parsed)
                 continue
+        except ChatUnreachable:
+            raise
         except Exception:
             pass
         # Fallback: one-by-one
@@ -765,7 +872,10 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path,
         # All chunks in this file share the same frontmatter-derived metadata
         metas = [fm_shortcut] * len(distilled)
     elif extract_metadata_now:
-        metas = extract_metadata_batch(texts_to_embed)
+        try:
+            metas = extract_metadata_batch(texts_to_embed)
+        except ChatUnreachable:
+            metas = [None] * len(distilled)  # leave for a later enrich_metadata pass
     else:
         # Phase 1: skip LLM metadata extraction; store NULL so a later
         # enrich_metadata pass can fill these in.
@@ -885,6 +995,12 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
 
     if report_progress and not _acquire_lock():
         raise RuntimeError("Another indexing run is in progress (lock file exists)")
+    try:
+        check_index_identity(con)
+    except RuntimeError:
+        if report_progress:
+            _release_lock()
+        raise
 
     # Load .embedignore from vault root (overrides scan even if vault_path is a subdir)
     ignore_patterns = load_ignore_patterns(VAULT_DIR)
@@ -1045,6 +1161,89 @@ def reconcile(con: sqlite3.Connection, vault_path: Path = None,
             _release_lock()
 
 
+def reembed(con: sqlite3.Connection, *, batch_size: int = 32,
+            report_progress: bool = True) -> dict:
+    """Re-embed every existing chunk with the configured model, in place.
+
+    For switching embedding models: keeps files, chunks (including LLM-distilled ones),
+    metadata and FTS untouched, and only rebuilds the `embeddings` vec0 table at
+    EMBED_DIMS — so it needs the embedding server but not the chat LLM. Resumable: an
+    interrupted run picks up at the first chunk without a vector; the index is marked
+    as built by the new model only once every chunk has one.
+    """
+    if report_progress and not _acquire_lock():
+        raise RuntimeError("Another indexing run is in progress (lock file exists)")
+    started_at = datetime.now(tz=timezone.utc).isoformat()
+    total = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    done = 0
+    pbar = None
+
+    def emit(status: str, **extra):
+        if report_progress:
+            _write_progress({
+                "status": status, "pid": os.getpid(), "started_at": started_at,
+                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                "phase": "reembedding", "target": CURRENT_IDENTITY,
+                "total_chunks": total, "embedded_this_run": done, **extra,
+            })
+
+    try:
+        target = _meta_get(con, "reembed_target")
+        if index_identity(con) != CURRENT_IDENTITY and target != CURRENT_IDENTITY:
+            # Fresh switch: vectors from the old model are useless to the new one.
+            con.execute("DROP TABLE IF EXISTS embeddings")
+            con.execute(
+                "CREATE VIRTUAL TABLE embeddings USING vec0("
+                f"chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{EMBED_DIMS}])"
+            )
+            _meta_set(con, "embed_identity", None)
+            _meta_set(con, "reembed_target", CURRENT_IDENTITY)
+            con.commit()
+
+        missing = con.execute(
+            "SELECT id, content FROM chunks "
+            "WHERE id NOT IN (SELECT chunk_id FROM embeddings) ORDER BY id"
+        ).fetchall()
+
+        if sys.stdout.isatty():
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(total=len(missing), unit="chunk", desc="Re-embedding")
+            except ImportError:
+                pbar = None
+
+        emit("running", remaining=len(missing))
+        for i in range(0, len(missing), batch_size):
+            batch = missing[i:i + batch_size]
+            vectors = embed_batch([r["content"] for r in batch])
+            for r, vector in zip(batch, vectors):
+                con.execute(
+                    "INSERT INTO embeddings (chunk_id, embedding) VALUES (?, ?)",
+                    (r["id"], json.dumps(vector)),
+                )
+            con.commit()
+            done += len(batch)
+            if pbar is not None:
+                pbar.update(len(batch))
+            emit("running", remaining=len(missing) - done)
+
+        _meta_set(con, "embed_identity", CURRENT_IDENTITY)
+        _meta_set(con, "reembed_target", None)
+        con.commit()
+        emit("completed", remaining=0,
+             finished_at=datetime.now(tz=timezone.utc).isoformat())
+        return {"identity": CURRENT_IDENTITY, "total_chunks": total, "embedded": done}
+    except Exception as e:
+        emit("failed", error=f"{type(e).__name__}: {e}",
+             finished_at=datetime.now(tz=timezone.utc).isoformat())
+        raise
+    finally:
+        if pbar is not None:
+            pbar.close()
+        if report_progress:
+            _release_lock()
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------
@@ -1054,7 +1253,8 @@ def semantic_search(con: sqlite3.Connection, query: str, *,
                     file_type: str = None, date_from: str = None,
                     date_to: str = None) -> list[dict]:
     """Hybrid search: vector KNN merged with FTS5 keyword results."""
-    qvec = embed(query)
+    check_index_identity(con, allow_partial=True)
+    qvec = embed(query, input_type="query")
 
     # --- Vector search ---
     vec_rows = con.execute(
@@ -1155,6 +1355,14 @@ def enrich_metadata(con: sqlite3.Connection, *, batch_size: int = 8,
     if not rows:
         return {"processed": 0, "errors": 0, "remaining": 0, "total_pending": 0}
 
+    # Don't sit through a 300s timeout per chunk when the chat model is down, and never
+    # store empty metadata for an outage — leave chunks NULL so a later run fills them.
+    unreachable = chat_model_unreachable()
+    if unreachable:
+        return {"processed": 0, "errors": 0, "remaining": total,
+                "total_pending": total, "skipped": unreachable}
+    skipped = None
+
     # Progress bar in TTY mode
     pbar = None
     if sys.stdout.isatty():
@@ -1179,6 +1387,9 @@ def enrich_metadata(con: sqlite3.Connection, *, batch_size: int = 8,
             texts = [r["content"] for r in batch]
             try:
                 metas = extract_metadata_batch(texts, max_batch_size=batch_size)
+            except ChatUnreachable as e:
+                skipped = str(e)  # went away mid-pass: stop, leave the rest pending
+                break
             except Exception as e:
                 # Mark as errored — store empty metadata so we don't retry on same content
                 metas = [dict(EMPTY_METADATA, _enrich_error=str(e)) for _ in batch]
@@ -1201,12 +1412,15 @@ def enrich_metadata(con: sqlite3.Connection, *, batch_size: int = 8,
     remaining = con.execute(
         "SELECT COUNT(*) FROM chunks WHERE metadata IS NULL"
     ).fetchone()[0]
-    return {
+    result = {
         "processed": processed,
         "errors": errors,
         "remaining": remaining,
         "total_pending": total,
     }
+    if skipped:
+        result["skipped"] = skipped
+    return result
 
 
 def index_stats(con: sqlite3.Connection) -> dict:
@@ -1228,6 +1442,8 @@ def index_stats(con: sqlite3.Connection) -> dict:
         "db_size_mb": round(db_size / 1024 / 1024, 1),
         "embed_model": EMBED_MODEL_NAME,
         "embed_dims": EMBED_DIMS,
+        "index_identity": index_identity(con),
+        "reembed_target": _meta_get(con, "reembed_target"),
         "chunks_pending_metadata": chunks_pending_metadata,
     }
 
@@ -1244,6 +1460,8 @@ if __name__ == "__main__":
                       help="Run vault reconciliation (chunk + embed; metadata extraction unless --no-metadata)")
     mode.add_argument("--enrich-metadata", action="store_true",
                       help="Extract LLM metadata for chunks where it's still NULL (fills in after a --no-metadata pass)")
+    mode.add_argument("--reembed", action="store_true",
+                      help="Re-embed all existing chunks with the configured model (after switching models); resumable")
     parser.add_argument("--path", help="Subpath under vault to scan (default: full vault)")
     parser.add_argument("--no-metadata", action="store_true",
                         help="Phase 1 only: skip LLM metadata extraction; vector search still works. Run --enrich-metadata later.")
@@ -1304,6 +1522,13 @@ if __name__ == "__main__":
     elif args.enrich_metadata:
         try:
             r = enrich_metadata(con, batch_size=args.batch_size, limit=args.limit)
+            print(json.dumps({"ok": True, **r}))
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)
+            sys.exit(1)
+    elif args.reembed:
+        try:
+            r = reembed(con)
             print(json.dumps({"ok": True, **r}))
         except Exception as e:
             print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), file=sys.stderr)

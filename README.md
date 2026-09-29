@@ -17,8 +17,8 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
   per-producer files.
 - **Vault semantic search** — local vector index of the entire vault using
   [`sqlite-vec`](https://github.com/asg017/sqlite-vec), embedded by
-  [Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) running locally,
-  with FTS5 keyword fallback. Two-phase indexing (embed first, enrich metadata later).
+  [voyage-4-nano](https://huggingface.co/voyageai/voyage-4-nano) served on CPU by
+  `embed-server.py` (also used by OpenClaw's memory search), with FTS5 keyword fallback. Two-phase indexing (embed first, enrich metadata later).
 - **Vault search** — keyword / structural search across the vault.
 - **Cellar inventory** — list / search / rate bottles.
 - **Todoist** — list, create, complete tasks across projects and labels.
@@ -62,6 +62,7 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 ├── localtime.py                 Local time/date for Steven's current location
 ├── vault-search.py              Full-text search across vault sections
 ├── vault_embed.py               Vector indexer / semantic search core
+├── embed-server.py              Local CPU embedding server (voyage-4-nano), own venv
 ├── pdf2md.py                    PDF → sidecar Markdown (pymupdf4llm + vision fallback)
 ├── html2md.py                   HTML/HTM → sidecar Markdown (markdownify)
 ├── morning-report.py            Daily greeting via Signal
@@ -97,9 +98,11 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_LOCATION_FILE` | `~/.openclaw/workspace/LOCATION.md` | Current city/state |
 | `MEMENTO_SOUL_FILE` | `~/.openclaw/workspace/SOUL.md` | Agent persona file |
 | `MEMENTO_EMBED_DB_PATH` | `~/obsidian-vault-index/vault-embed.db` | Vector index |
-| `MEMENTO_EMBED_MODEL_URL` | `http://dgx-spark:1234/v1` | Embedding endpoint (LM Studio / vLLM) |
-| `MEMENTO_EMBED_MODEL_NAME` | `text-embedding-qwen3-embedding-4b` | Embedding model |
-| `MEMENTO_EMBED_DIMS` | `2560` | Vector dimensions |
+| `MEMENTO_EMBED_MODEL_URL` | `http://127.0.0.1:8790/v1` | Embedding endpoint (local `embed-server.py`; any OpenAI/Voyage-compatible `/embeddings`) |
+| `MEMENTO_EMBED_MODEL_NAME` | `voyage-4-nano` | Embedding model |
+| `MEMENTO_EMBED_DIMS` | `1024` | Vector dimensions |
+| `MEMENTO_EMBED_SERVER_HOST` / `_PORT` | `127.0.0.1` / `8790` | Where `embed-server.py` listens |
+| `MEMENTO_EMBED_SERVER_MODEL` / `_MODEL_REVISION` | `voyageai/voyage-4-nano` / pinned commit | Model the server loads (revision pinned: it runs remote code) |
 | `MEMENTO_CHAT_MODEL_URL` | `http://dgx-spark:1234/v1` | Chat LLM endpoint |
 | `MEMENTO_CHAT_MODEL_NAME` | `qwen3.6-35b-a3b@q8_k_xl` | Chat LLM (used for metadata extraction & distillation) |
 | `MEMENTO_SIGNAL_TARGET` | (empty) | Signal UUID for notifications (e.g. `uuid:...`) |
@@ -145,10 +148,28 @@ extract LLM metadata in a second pass.
 
 # Subdirectory
 ./.venv/bin/python3 vault_embed.py --reconcile --path Cellar
+
+# After changing MEMENTO_EMBED_MODEL_* / _DIMS: re-embed every chunk in place
+# (keeps chunks + metadata, needs no chat LLM; resumable)
+./.venv/bin/python3 vault_embed.py --reembed
 ```
 
+The index records which `model@dims` built its vectors. If the configured model
+differs, indexing refuses to run and search raises until `--reembed` finishes
+(search is allowed on a partially re-embedded index).
+
+### Embedding server
+
+`embed-server.py` serves voyage-4-nano on CPU with a Voyage/OpenAI-compatible
+`POST /v1/embeddings` (`input_type`: `query` | `document`, `output_dimension`), plus
+`GET /v1/models` and `/health`. It runs from its own venv because of torch — see its
+docstring and `requirements-embed.txt` (keep `transformers<5`). On Steven's host it runs
+as the `embed-server.service` systemd user unit with `Nice=19`, `CPUQuota=150%` and
+`MemoryMax=5G` so embedding never starves the agent. OpenClaw's memory search uses it
+via `memorySearch.provider: "voyage"` with `remote.baseUrl: http://127.0.0.1:8790/v1`.
+
 What you get:
-- Vector search via `sqlite-vec` (2560-dim Qwen3-Embedding vectors)
+- Vector search via `sqlite-vec` (1024-dim voyage-4-nano vectors by default)
 - Keyword search via SQLite FTS5 — automatically merged with vector results via
   Reciprocal Rank Fusion
 - LLM-extracted metadata per chunk: `people`, `topics`, `action_items`, `dates_mentioned`
