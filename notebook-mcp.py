@@ -12,7 +12,9 @@ Thin wrapper over notebook.py (all logic lives there). Tools:
   notebook_reprocess   redo one page from its original with new parameters
   notebook_status      pages, gaps, untranscribed pages
   notebook_rebuild     redo every page from its originals
+  notebook_set_size    change the page size (re-renders every page)
   notebook_finish      mark finished, final compile
+  notebook_close       (after finish) irreversible close-out to PDF + index note
 
 Never prints to stdout (that is the MCP channel).
 """
@@ -53,7 +55,7 @@ async def list_tools() -> list[types.Tool]:
               "Start a new notebook folder + index note. Ask Steven for the page size first.",
               {"name": {"type": "string", "description": "e.g. 'Notebook' or a description from the first page"},
                "size": {"type": "string",
-                        "description": "'passport' (3.5x5in), 'regular' (110x210mm), or 'WxHmm' / 'WxHin'"},
+                        "description": "'passport' (3.5x5in), 'regular' (110x210mm), 'field-notes' (3.5x5.5in), or 'WxHmm' / 'WxHin'"},
                "started": {"type": "string", "description": "YYYY-MM-DD from the first page; default today"},
                "description": {"type": "string"}},
               ["name", "size"]),
@@ -114,8 +116,25 @@ async def list_tools() -> list[types.Tool]:
               "Redo pages from their stored originals with their recorded parameters, then "
               "recompile the PDF. Use after the image pipeline improves.",
               {"notebook": _NB, "pages": {"type": "array", "items": _PAGE}}),
+        _tool("notebook_set_size",
+              "Change the notebook's physical page size (if it was set wrong). Re-renders every "
+              "page from its stored original at the new geometry and recompiles the PDF. Only "
+              "when Steven asks.",
+              {"notebook": _NB,
+               "size": {"type": "string",
+                        "description": "'passport', 'regular', 'field-notes', or 'WxHmm' / 'WxHin'"}},
+              ["size"]),
         _tool("notebook_finish", "Mark the notebook finished and do a final compile.",
               {"notebook": _NB, "finished": {"type": "string", "description": "YYYY-MM-DD; default today"}}),
+        _tool("notebook_close",
+              "IRREVERSIBLE close-out of a FINISHED notebook: final PDF compile; the PDF and the "
+              "index note move up to Notebooks/ (note links the PDF, status: closed); the folder "
+              "with page images, originals and manifest is deleted, so pages can never be fixed "
+              "or rebuilt again. Only when Steven explicitly asks to close out a notebook, and "
+              "confirm with him first. Requires confirm=true and an explicit notebook name.",
+              {"notebook": {"type": "string", "description": "Notebook folder name (required)"},
+               "confirm": {"type": "boolean"}},
+              ["notebook", "confirm"]),
     ]
 
 
@@ -141,6 +160,12 @@ def _dispatch(name: str, a: dict):
         return nbk.status(nbk.find_notebook(a.get("notebook")))
     if name == "notebook_rebuild":
         return nbk.rebuild(nbk.find_notebook(a.get("notebook")), a.get("pages"))
+    if name == "notebook_set_size":
+        return nbk.set_size(nbk.find_notebook(a.get("notebook")), a["size"])
+    if name == "notebook_close":
+        if not a.get("notebook"):
+            raise ValueError("notebook_close needs an explicit notebook name")
+        return nbk.close(nbk.find_notebook(a["notebook"]), bool(a.get("confirm")))
     if name == "notebook_finish":
         return nbk.finish(nbk.find_notebook(a.get("notebook")), a.get("finished"))
     raise ValueError(f"unknown tool {name}")

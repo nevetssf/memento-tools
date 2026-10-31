@@ -298,6 +298,7 @@ class TestNotePatching(unittest.TestCase):
         self.assertEqual(nbk._size_record("passport (3.5x5in)")["px"], [1050, 1500])
         self.assertEqual(nbk._size_record("regular")["px"], [1299, 2480])
         self.assertEqual(nbk._size_record("90x140mm")["pagesize"], "90mmx140mm")
+        self.assertEqual(nbk._size_record("field-notes")["px"], [1050, 1650])
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +387,76 @@ class TestNotebookFlow(unittest.TestCase):
         r = nbk.rebuild(self.nb)
         self.assertEqual(r["rebuilt"], ["1"])
         self.assertNotEqual((self.nb / "page-001.jpg").read_bytes(), before)
+
+    def _page_size(self, pid):
+        from PIL import Image
+        with Image.open(self.nb / nbk.page_filename(pid)) as im:
+            return im.size
+
+    def test_set_size_rerenders_everything(self):
+        self._ingest_file(["spread.jpg"], [("c1", 1), ("c2", 2)])
+        self.assertEqual(self._page_size("1"), (1050, 1500))
+        r = nbk.set_size(self.nb, "field-notes")
+        self.assertEqual(r["rebuilt"], ["1", "2"])
+        self.assertEqual(r["page_px"], [1050, 1650])
+        self.assertEqual(self._page_size("2"), (1050, 1650))
+        fm = nbk.index_note(self.nb).read_text()
+        self.assertIn("size: field-notes (3.5inx5.5in)\n", fm)
+        self.assertIn("page_px: 1050x1650\n", fm)
+        self.assertEqual(nbk.status(self.nb)["page_px"], [1050, 1650])
+
+    def test_candidates_staged_before_resize_are_rerendered(self):
+        b = nbk.ingest(self.nb, [str(self.photos / "single.jpg")])
+        nbk.set_size(self.nb, "3.5x5.5in")
+        nbk.file_pages(b["id"], [{"candidate": "c1", "page": 1}])
+        self.assertEqual(self._page_size("1"), (1050, 1650))
+
+    def test_set_size_refuses_pages_without_originals(self):
+        shutil.copyfile(self.photos / "single.jpg", self.nb / "page-005.jpg")
+        with self.assertRaises(nbk.NotebookError):
+            nbk.set_size(self.nb, "field-notes")
+        self.assertIn("page_px: 1050x1500", nbk.index_note(self.nb).read_text())
+
+    def test_close_requires_finish_and_confirm(self):
+        self._ingest_file(["single.jpg"], [("c1", 1)])
+        with self.assertRaises(nbk.NotebookError):
+            nbk.close(self.nb, confirm=True)            # not finished yet
+        nbk.finish(self.nb)
+        with self.assertRaises(nbk.NotebookError):
+            nbk.close(self.nb)                          # no confirm
+        self.assertTrue(self.nb.exists())
+
+    def test_close_moves_pdf_and_note_up_and_deletes_folder(self):
+        self._ingest_file(["spread.jpg"], [("c1", 1), ("c2", 2)])
+        nbk.transcribe(self.nb, 1, "one")
+        nbk.finish(self.nb)
+        r = nbk.close(self.nb, confirm=True)
+        self.assertFalse(self.nb.exists())
+        pdf, note = Path(r["pdf"]), Path(r["note"])
+        self.assertEqual(pdf.parent, self.root)
+        self.assertTrue(pdf.exists())
+        text = note.read_text()
+        self.assertIn("status: closed\n", text)
+        self.assertIn("closed: 2026-11-01", text)
+        self.assertIn(f"PDF: [[{pdf.name}]]", text)
+        self.assertIn("## Page 001", text)                 # transcriptions kept
+        self.assertEqual(r["pages"], [1, 2])
+        listed = {n["name"]: n for n in nbk.list_notebooks()}
+        self.assertEqual(listed[self.nb.name]["status"], "closed")
+        self.assertEqual(listed[self.nb.name]["pages"], 2)
+
+    def test_close_refuses_unexpected_files_and_clashes(self):
+        self._ingest_file(["single.jpg"], [("c1", 1)])
+        nbk.finish(self.nb)
+        stray = self.nb / "notes-to-self.txt"
+        stray.write_text("keep me")
+        with self.assertRaises(nbk.NotebookError):
+            nbk.close(self.nb, confirm=True)
+        stray.unlink()
+        (self.root / f"{self.nb.name}.pdf").write_bytes(b"x")
+        with self.assertRaises(nbk.NotebookError):
+            nbk.close(self.nb, confirm=True)
+        self.assertTrue((self.nb / "page-001.jpg").exists())
 
     def test_legacy_page_without_original(self):
         shutil.copyfile(self.photos / "single.jpg", self.nb / "page-005.jpg")
