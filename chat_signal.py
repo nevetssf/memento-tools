@@ -92,8 +92,13 @@ def _to_date(value) -> _date:
     raise TypeError(f"Cannot interpret {value!r} as a date")
 
 
-def _chat_dir(d: _date) -> Path:
-    return CHAT_ROOT / f"{d.year:04d}" / f"{d.month:02d}"
+def _chat_dir(d: _date, group: str | None = None) -> Path:
+    root = CHAT_ROOT / "Groups" / _group_dirname(group) if group else CHAT_ROOT
+    return root / f"{d.year:04d}" / f"{d.month:02d}"
+
+
+def _group_dirname(group: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]+', "-", group).strip(" .-") or "Unnamed Group"
 
 
 def _photo_dir(d: _date) -> Path:
@@ -112,15 +117,15 @@ def _attachment_dir(d: _date, kind: str) -> Path:
     return _chat_dir(d) / subdir
 
 
-def _chat_file(d: _date) -> Path:
-    return _chat_dir(d) / f"{d.isoformat()}.md"
+def _chat_file(d: _date, group: str | None = None) -> Path:
+    return _chat_dir(d, group) / f"{d.isoformat()}.md"
 
 
 def get_path(date=None) -> str:
     return str(_chat_file(_to_date(date)))
 
 
-def _ensure_file(path: Path, d: _date) -> None:
+def _ensure_file(path: Path, d: _date, group: str | None = None) -> None:
     # File-size check (not just existence) because _file_lock touches the
     # file before locking, so an empty file may exist with no frontmatter.
     if path.exists() and path.stat().st_size > 0:
@@ -130,7 +135,8 @@ def _ensure_file(path: Path, d: _date) -> None:
         "---\n"
         f"date: {d.isoformat()}\n"
         "channel: signal\n"
-        "tags: [chat]\n"
+        + (f'group: "{group}"\n' if group else "")
+        + f"tags: [{'chat, group-chat' if group else 'chat'}]\n"
         "---\n"
     )
     path.write_text(frontmatter)
@@ -264,16 +270,16 @@ def _normalize_photo(photo: str, d: _date) -> str:
 
 # ---------- Markdown rendering --------------------------------------------
 
-def _speaker_label(sender: str, agent: str) -> str:
-    if sender not in VALID_SENDERS:
+def _speaker_label(sender: str, agent: str, group: str | None = None) -> str:
+    if sender not in VALID_SENDERS and not group:
         return f"unknown:{sender}"
     if sender == "Memento" and agent and agent != DEFAULT_AGENT:
         return f"Memento ({agent})"
     return sender
 
 
-def _render_message(msg: Message) -> str:
-    speaker = _speaker_label(msg.sender, msg.agent)
+def _render_message(msg: Message, group: str | None = None) -> str:
+    speaker = _speaker_label(msg.sender, msg.agent, group)
     if msg.photos and msg.text:
         body = [f"**{speaker}:**", *msg.photos, msg.text]
     elif msg.photos:
@@ -299,8 +305,12 @@ def save_message(
     timestamp=None,
     photos=None,
     agent: str = DEFAULT_AGENT,
+    group: str | None = None,
 ) -> dict:
-    """Append a single message to today's (or timestamp's) chat file."""
+    """Append a single message to today's (or timestamp's) chat file.
+
+    With `group`, writes to Chats/Signal/Groups/<group>/... and accepts any sender name.
+    """
     if not text and not photos:
         raise ValueError("save_message: text and photos cannot both be empty")
 
@@ -322,12 +332,12 @@ def save_message(
         agent=agent,
     )
 
-    file_path = _chat_file(d)
+    file_path = _chat_file(d, group)
     new_heading = _render_heading(when).strip()
-    rendered_msg = _render_message(msg)
+    rendered_msg = _render_message(msg, group)
 
     with _file_lock(file_path):
-        _ensure_file(file_path, d)
+        _ensure_file(file_path, d, group)
         existing = file_path.read_text()
 
         last_heading_text = None
@@ -347,7 +357,7 @@ def save_message(
     return {
         "path": str(file_path),
         "timestamp": msg.timestamp,
-        "speaker": _speaker_label(sender, agent),
+        "speaker": _speaker_label(sender, agent, group),
     }
 
 

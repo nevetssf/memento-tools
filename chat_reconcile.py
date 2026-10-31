@@ -64,7 +64,7 @@ def _save_state(state: dict) -> None:
 
 
 def _signal_sessions(sessions: dict):
-    """Yield (sessionKey, sessionFile) for sessions that route via Signal."""
+    """Yield (sessionKey, sessionFile, group_subject|None) for Signal sessions."""
     for key, val in sessions.items():
         if ":signal:" not in key:
             continue
@@ -72,7 +72,10 @@ def _signal_sessions(sessions: dict):
             continue
         sf = val.get("sessionFile")
         if sf and Path(sf).exists():
-            yield key, sf
+            group = None
+            if val.get("chatType") == "group" or ":group:" in key:
+                group = val.get("subject") or val.get("groupId") or "Unnamed Group"
+            yield key, sf, group
 
 
 def _local_zone() -> ZoneInfo:
@@ -148,14 +151,15 @@ def _parse_message(obj: dict):
         text = _strip_metadata(text)
         if not text:
             return None
-        sender = "Steven"
+        sender_name = (msg.get("__openclaw") or {}).get("senderName") or "Steven"
+        sender = sender_name.split()[0]
     else:
         sender = "Memento"
 
     return ts, sender, text
 
 
-def _reconcile_file(session_file: str, state: dict, tz: ZoneInfo) -> tuple[int, int]:
+def _reconcile_file(session_file: str, state: dict, tz: ZoneInfo, group: str | None = None) -> tuple[int, int]:
     """Process new lines in one session file. Returns (written, skipped)."""
     last_offset = state.get(session_file, 0)
     path = Path(session_file)
@@ -190,7 +194,7 @@ def _reconcile_file(session_file: str, state: dict, tz: ZoneInfo) -> tuple[int, 
             utc_iso, sender, text = parsed
             local_dt = _to_local_dt(utc_iso, tz)
             try:
-                cs.save_message(sender=sender, text=text, timestamp=local_dt)
+                cs.save_message(sender=sender, text=text, timestamp=local_dt, group=group)
                 written += 1
             except Exception as e:
                 print(f"[reconcile] save failed for {sender}: {e}", file=sys.stderr)
@@ -216,9 +220,9 @@ def reconcile() -> dict:
     total_written = 0
     total_skipped = 0
     files = 0
-    for _key, sf in _signal_sessions(sessions):
+    for _key, sf, group in _signal_sessions(sessions):
         files += 1
-        w, s = _reconcile_file(sf, state, tz)
+        w, s = _reconcile_file(sf, state, tz, group)
         total_written += w
         total_skipped += s
 
