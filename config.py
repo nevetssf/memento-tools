@@ -35,6 +35,12 @@ SOUL_FILE = Path(os.environ.get("MEMENTO_SOUL_FILE",
 TEMPLATES_DIR = Path(os.environ.get("MEMENTO_TEMPLATES_DIR", str(VAULT_DIR / "Templates")))
 
 # Cellar — wine and spirits collection (default: $VAULT_DIR/Cellar)
+# Paper notebooks (notebook.py / notebook-mcp.py). Staging holds candidate
+# pages awaiting review; it lives outside the vault so it never syncs.
+NOTEBOOKS_DIR = Path(os.environ.get("MEMENTO_NOTEBOOKS_DIR", str(VAULT_DIR / "Notebooks")))
+NOTEBOOK_STAGING_DIR = Path(os.environ.get("MEMENTO_NOTEBOOK_STAGING_DIR",
+                                           str(Path.home() / ".cache" / "memento" / "notebook-staging")))
+
 CELLAR_DIR = Path(os.environ.get("MEMENTO_CELLAR_DIR", str(VAULT_DIR / "Cellar")))
 CELLAR_DIRS = {
     "wine":    CELLAR_DIR / "Wine",

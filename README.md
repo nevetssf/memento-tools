@@ -24,6 +24,10 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 - **Todoist** — list, create, complete tasks across projects and labels.
 - **Format converters** — turn PDFs and HTML files into sidecar `.md` files so they
   show up cleanly in Obsidian and embed well.
+- **Paper notebooks** — file phone photos / scans of notebook pages (single pages,
+  two-page spreads, sideways shots) into a per-notebook vault folder: auto crop,
+  deskew, curl flattening, clean-up, a compiled PDF at the physical page size, and
+  a transcription index note.
 
 ## Architecture
 
@@ -46,6 +50,8 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 ├── vault-embed-mcp.py           index_vault, semantic_search, search_recent,
 │                                index_progress, enrich_metadata, index_status
 ├── todoist-mcp.py               list/add/complete/update/delete tasks
+├── notebook-mcp.py              notebook_ingest, notebook_file, notebook_transcribe,
+│                                notebook_status, notebook_reprocess, notebook_rebuild, ...
 │
 │  Underlying scripts (also runnable from the CLI)
 ├── people.py                    Relationship CRUD + inference engine
@@ -65,6 +71,9 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 ├── embed-server.py              Local CPU embedding server (voyage-4-nano), own venv
 ├── pdf2md.py                    PDF → sidecar Markdown (pymupdf4llm + vision fallback)
 ├── html2md.py                   HTML/HTM → sidecar Markdown (markdownify)
+├── notebook.py                  Paper notebook archive: ingest, file, transcribe, rebuild
+├── notebook_image.py            Page detection / crop / deskew / dewarp / clean (OpenCV)
+├── notebook-page-clean.py       One-off CLI over notebook_image.py
 ├── morning-report.py            Daily greeting via Signal
 ├── check-important-email.py     Surface high-priority email
 └── tests/
@@ -123,7 +132,8 @@ in the shell that launches the MCP servers.
       "vault-db":    {"command": "/path/to/.venv/bin/python3", "args": ["/path/to/memento-tools/vault-mcp.py"]},
       "cellar-db":   {"command": "/path/to/.venv/bin/python3", "args": ["/path/to/memento-tools/cellar-mcp.py"]},
       "vault-embed": {"command": "/path/to/.venv/bin/python3", "args": ["/path/to/memento-tools/vault-embed-mcp.py"]},
-      "todoist":     {"command": "/path/to/.venv/bin/python3", "args": ["/path/to/memento-tools/todoist-mcp.py"]}
+      "todoist":     {"command": "/path/to/.venv/bin/python3", "args": ["/path/to/memento-tools/todoist-mcp.py"]},
+      "notebook":    {"command": "/path/to/.venv/bin/python3", "args": ["/path/to/memento-tools/notebook-mcp.py"]}
     }
   }
 }
@@ -241,6 +251,57 @@ Both backends:
 Same shape as `pdf2md.py`. Uses BeautifulSoup to strip non-content
 (`script`/`style`/`nav`/`footer`/etc.), then [`markdownify`](https://pypi.org/project/markdownify/)
 for the conversion. Useful for old web clippings that Obsidian can't render usefully.
+
+## Paper notebooks
+
+```bash
+./.venv/bin/python3 notebook.py new "Notebook" --size passport --started 2026-09-30
+./.venv/bin/python3 notebook.py ingest ~/photo1.jpg ~/scan.pdf      # -> batch + candidates
+./.venv/bin/python3 notebook.py file <batch> c1=12 c2=13:flip       # candidate=page[:flip]
+./.venv/bin/python3 notebook.py transcribe 12 --text-file page12.txt
+./.venv/bin/python3 notebook.py status | reprocess N [...] | rebuild | finish
+```
+
+Each notebook is `Notebooks/<started> <name>/` with an index note (frontmatter +
+one `## Page NNN` section of verbatim transcription per page), `page-NNN.jpg` files at
+exact page geometry and 300 dpi (`page-000-cover.jpg`, `page-999-back.jpg`), and a PDF
+compiled with `img2pdf` at the physical page size. Sizes: `passport` (3.5×5 in),
+`regular` (110×210 mm), or any `WxHmm` / `WxHin`.
+
+**Ingest** stages candidates in `$MEMENTO_NOTEBOOK_STAGING_DIR` (outside the vault;
+batches expire after 7 days) for review before anything touches the notebook:
+
+- PDFs (Scanner Pro): embedded page scans are extracted losslessly (`pdfimages -j`)
+  and mapped full-frame to the page geometry (fixing the scanner's aspect error). A
+  scan of two facing pages is split; a scan that isn't page-shaped (a partial cover)
+  is padded, not stretched.
+- Photos: `notebook_image.classify_layout` finds the paper and decides single page vs
+  spread vs sideways using, in order: two side-by-side paper blobs; the V-dip of the
+  fold in the paper outline; a fold found from shading (the two pages face the light
+  at different angles, so the fold is a brightness step or a shadow trough); and
+  finally the outline's aspect against the notebook's page aspect. Fold candidates must
+  leave a page-shaped piece, which rejects bright clutter merged into the paper blob.
+  A single page with part of its facing page in frame keeps the larger side.
+- Each page: quad fitted to that page's own mask (facing pages aren't coplanar), edges
+  re-fitted as lines so rounded corners don't clip writing, inner edge extended
+  across the fold then trimmed back to the crease, perspective warp, **dewarp**
+  (straightens bowed top/bottom edges column by column — only the curvature, not the
+  framing), illumination flattening, and **bleed-through suppression** (strength 1 by
+  default; covers stay in colour with no suppression).
+- Quality flags (writing reaching an edge, rectangle fallback, centre-cut spread,
+  implausible curl) tell the reviewer where to look. Sideways shots can come out
+  upside down — `flip` on filing fixes it exactly.
+
+**Originals** are kept in `<notebook>/.originals/` (hidden from Obsidian), one per
+source photo/scan *in use*: a spread photo is shared by both of its pages, and an
+original is deleted when no page references it any more. `.notebook.json` records
+each page's original and processing parameters, so `rebuild` redoes the whole
+notebook when the image pipeline improves, and `reprocess` redoes one page with
+different parameters (rotation, manual corners, stronger bleed suppression, ...).
+
+All notebook writes take an flock on `<notebook>/.notebook.lock`; the index note is
+only ever patched (frontmatter fields by regex, one page section at a time). System
+tools needed: `img2pdf`, `poppler-utils`.
 
 ## Cellar templates
 
