@@ -28,6 +28,7 @@ Workflow (the agent drives it; the script does everything deterministic):
   reprocess   redo one page from its original with different parameters
               (rotation, manual corners, ...) -> a new candidate to file
   rebuild     redo every page from its originals with recorded parameters
+  set-size    change the page size; re-renders every page from its original
   status / finish / list / new / compile
 
 All writes to a notebook are serialised with an flock on .notebook.lock.
@@ -52,6 +53,8 @@ import time
 from datetime import date, datetime
 from pathlib import Path
 
+from PIL import Image
+
 sys.path.insert(0, str(Path(__file__).parent))
 from config import NOTEBOOKS_DIR, NOTEBOOK_STAGING_DIR  # noqa: E402
 import journal_fm  # noqa: E402
@@ -66,6 +69,7 @@ STAGING_TTL_DAYS = 7
 SIZES = {
     "passport": ("3.5inx5in", 3.5, 5.0),
     "regular": ("110mmx210mm", 110 / 25.4, 210 / 25.4),
+    "field-notes": ("3.5inx5.5in", 3.5, 5.5),
 }
 
 COVER, BACK = "cover", "back"
@@ -573,7 +577,9 @@ def file_pages(batch_id: str, assignments: list[dict], received: str | None = No
             pid = norm_page(a["page"])
             params = ni.PageParams.from_dict(c["params"])
             src_img = Path(c["image"])
-            rerender = False
+            # staged before a size change? render again at the current size
+            with Image.open(src_img) as im:
+                rerender = tuple(im.size) != px
             if a.get("flip"):
                 params.flip = not params.flip
                 rerender = True
@@ -658,40 +664,72 @@ def reprocess(nb: Path, page, **overrides) -> dict:
             "review": f"View the candidate; if it's right, file c1 as page {pid}."}
 
 
+def _rebuild_locked(nb: Path, man: dict, want: set | None) -> dict:
+    """Rebuild body; caller holds the notebook lock."""
+    done, skipped, flagged = [], [], {}
+    px = tuple(man["size"]["px"])
+    on_disk = pages_on_disk(nb)
+    for pid in sorted(set(on_disk) | set(man["pages"]), key=page_sort_key):
+        if want is not None and pid not in want:
+            continue
+        rec = man["pages"].get(pid)
+        if not rec or not (nb / ORIGINALS / rec["original"]).exists():
+            skipped.append(pid)
+            continue
+        img = ni.load_image(nb / ORIGINALS / rec["original"])
+        try:
+            page, info = ni.process_page(img, ni.PageParams.from_dict(rec["params"]), *px)
+        except ValueError as e:
+            flagged[pid] = [str(e)]
+            continue
+        with tempfile.NamedTemporaryFile(prefix=".rebuild-", suffix=".jpg", dir=nb, delete=False) as t:
+            tmp = Path(t.name)
+        try:
+            ni.save_image(page, tmp)
+            _atomic_write(nb / page_filename(pid), tmp.read_bytes())
+        finally:
+            tmp.unlink(missing_ok=True)
+        done.append(pid)
+        if info["flags"]:
+            flagged[pid] = info["flags"]
+    pdf = compile_pdf(nb, man)
+    return {"notebook": nb.name, "rebuilt": done, "no_original": skipped,
+            "flags": flagged, "pdf": pdf}
+
+
 def rebuild(nb: Path, pages: list | None = None) -> dict:
     """Redo pages from their originals with their recorded parameters."""
     want = {norm_page(p) for p in pages} if pages else None
-    done, skipped, flagged = [], [], {}
+    with locked(nb):
+        return _rebuild_locked(nb, load_manifest(nb), want)
+
+
+def set_size(nb: Path, size: str) -> dict:
+    """Change the notebook's physical page size: update the manifest and the
+    index note's size/page_px, re-render every page from its original at the
+    new geometry, recompile the PDF. Refuses if any page has no stored
+    original (it could not be re-rendered and would keep the old size)."""
+    rec = _size_record(size)
+    w, h = rec["px"]
+    label = size if "(" in size else f"{size} ({rec['pagesize']})"
+    rec["label"] = label
     with locked(nb):
         man = load_manifest(nb)
-        px = tuple(man["size"]["px"])
-        on_disk = pages_on_disk(nb)
-        for pid in sorted(set(on_disk) | set(man["pages"]), key=page_sort_key):
-            if want is not None and pid not in want:
-                continue
-            rec = man["pages"].get(pid)
-            if not rec or not (nb / ORIGINALS / rec["original"]).exists():
-                skipped.append(pid)
-                continue
-            img = ni.load_image(nb / ORIGINALS / rec["original"])
-            try:
-                page, info = ni.process_page(img, ni.PageParams.from_dict(rec["params"]), *px)
-            except ValueError as e:
-                flagged[pid] = [str(e)]
-                continue
-            with tempfile.NamedTemporaryFile(prefix=".rebuild-", suffix=".jpg", dir=nb, delete=False) as t:
-                tmp = Path(t.name)
-            try:
-                ni.save_image(page, tmp)
-                _atomic_write(nb / page_filename(pid), tmp.read_bytes())
-            finally:
-                tmp.unlink(missing_ok=True)
-            done.append(pid)
-            if info["flags"]:
-                flagged[pid] = info["flags"]
-        pdf = compile_pdf(nb, man)
-    return {"notebook": nb.name, "rebuilt": done, "no_original": skipped,
-            "flags": flagged, "pdf": pdf}
+        missing = sorted((p for p in pages_on_disk(nb)
+                          if p not in man["pages"]
+                          or not (nb / ORIGINALS / man["pages"][p]["original"]).exists()),
+                         key=page_sort_key)
+        if missing:
+            raise NotebookError(f"pages without a stored original can't be resized: {missing}; "
+                                "retake and file them first")
+        old = man["size"]
+        man["size"] = rec
+        save_manifest(nb, man)
+        note = index_note(nb)
+        note.write_text(_patch_frontmatter(note.read_text(),
+                                           {"size": label, "page_px": f"{w}x{h}"}))
+        result = _rebuild_locked(nb, man, None)
+    return {**result, "old_size": old.get("label"), "new_size": label, "page_px": [w, h]}
 
 
 def status(nb: Path) -> dict:
@@ -790,6 +828,10 @@ def main(argv=None) -> int:
     p.add_argument("--no-dewarp", action="store_true")
     p.add_argument("--color", action="store_true", default=None)
 
+    p = sub.add_parser("set-size")
+    p.add_argument("size", help="passport | regular | field-notes | WxHmm | WxHin")
+    p.add_argument("--notebook")
+
     for name in ("status", "compile", "finish"):
         p = sub.add_parser(name)
         p.add_argument("--notebook")
@@ -823,6 +865,8 @@ def main(argv=None) -> int:
             if a.no_dewarp:
                 ov["dewarp"] = False
             _out(reprocess(find_notebook(a.notebook), a.page, **ov))
+        elif a.cmd == "set-size":
+            _out(set_size(find_notebook(a.notebook), a.size))
         elif a.cmd == "status":
             _out(status(find_notebook(a.notebook)))
         elif a.cmd == "compile":

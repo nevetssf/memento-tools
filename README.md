@@ -260,13 +260,17 @@ for the conversion. Useful for old web clippings that Obsidian can't render usef
 ./.venv/bin/python3 notebook.py file <batch> c1=12 c2=13:flip       # candidate=page[:flip]
 ./.venv/bin/python3 notebook.py transcribe 12 --text-file page12.txt
 ./.venv/bin/python3 notebook.py status | reprocess N [...] | rebuild | finish
+./.venv/bin/python3 notebook.py set-size field-notes          # fix a wrong size; re-renders all pages
 ```
 
 Each notebook is `Notebooks/<started> <name>/` with an index note (frontmatter +
 one `## Page NNN` section of verbatim transcription per page), `page-NNN.jpg` files at
 exact page geometry and 300 dpi (`page-000-cover.jpg`, `page-999-back.jpg`), and a PDF
 compiled with `img2pdf` at the physical page size. Sizes: `passport` (3.5×5 in),
-`regular` (110×210 mm), or any `WxHmm` / `WxHin`.
+`regular` (110×210 mm), `field-notes` (3.5×5.5 in), or any `WxHmm` / `WxHin`.
+`set-size` changes a notebook's size after the fact by re-rendering every page from
+its stored original (it refuses if any page has no original); candidates staged
+before the change are re-rendered at the new size when filed.
 
 **Ingest** stages candidates in `$MEMENTO_NOTEBOOK_STAGING_DIR` (outside the vault;
 batches expire after 7 days) for review before anything touches the notebook:
