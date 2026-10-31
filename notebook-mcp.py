@@ -14,6 +14,7 @@ Thin wrapper over notebook.py (all logic lives there). Tools:
   notebook_rebuild     redo every page from its originals
   notebook_set_size    change the page size (re-renders every page)
   notebook_finish      mark finished, final compile
+  notebook_close       (after finish) irreversible close-out to PDF + index note
 
 Never prints to stdout (that is the MCP channel).
 """
@@ -125,6 +126,15 @@ async def list_tools() -> list[types.Tool]:
               ["size"]),
         _tool("notebook_finish", "Mark the notebook finished and do a final compile.",
               {"notebook": _NB, "finished": {"type": "string", "description": "YYYY-MM-DD; default today"}}),
+        _tool("notebook_close",
+              "IRREVERSIBLE close-out of a FINISHED notebook: final PDF compile; the PDF and the "
+              "index note move up to Notebooks/ (note links the PDF, status: closed); the folder "
+              "with page images, originals and manifest is deleted, so pages can never be fixed "
+              "or rebuilt again. Only when Steven explicitly asks to close out a notebook, and "
+              "confirm with him first. Requires confirm=true and an explicit notebook name.",
+              {"notebook": {"type": "string", "description": "Notebook folder name (required)"},
+               "confirm": {"type": "boolean"}},
+              ["notebook", "confirm"]),
     ]
 
 
@@ -152,6 +162,10 @@ def _dispatch(name: str, a: dict):
         return nbk.rebuild(nbk.find_notebook(a.get("notebook")), a.get("pages"))
     if name == "notebook_set_size":
         return nbk.set_size(nbk.find_notebook(a.get("notebook")), a["size"])
+    if name == "notebook_close":
+        if not a.get("notebook"):
+            raise ValueError("notebook_close needs an explicit notebook name")
+        return nbk.close(nbk.find_notebook(a["notebook"]), bool(a.get("confirm")))
     if name == "notebook_finish":
         return nbk.finish(nbk.find_notebook(a.get("notebook")), a.get("finished"))
     raise ValueError(f"unknown tool {name}")

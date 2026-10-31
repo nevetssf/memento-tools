@@ -29,6 +29,8 @@ Workflow (the agent drives it; the script does everything deterministic):
               (rotation, manual corners, ...) -> a new candidate to file
   rebuild     redo every page from its originals with recorded parameters
   set-size    change the page size; re-renders every page from its original
+  close       (after finish) irreversible close-out: PDF + index note move up to
+              Notebooks/, the folder (pages, originals, manifest) is deleted
   status / finish / list / new / compile
 
 All writes to a notebook are serialised with an flock on .notebook.lock.
@@ -315,6 +317,7 @@ def find_notebook(name: str | None = None, root: Path | None = None) -> Path:
 
 
 def list_notebooks(root: Path | None = None) -> list[dict]:
+    root = root or NOTEBOOKS_DIR
     out = []
     for b in all_notebooks(root):
         fm = _fm_of(b)
@@ -322,6 +325,15 @@ def list_notebooks(root: Path | None = None) -> list[dict]:
                     "status": journal_fm.get_field(fm, "status"),
                     "size": journal_fm.get_field(fm, "size"),
                     "pages": len([p for p in pages_on_disk(b) if p not in (COVER, BACK)])})
+    # closed-out notebooks: an index note + PDF directly in the root
+    if root.is_dir():
+        for note in sorted(root.glob("*.md")):
+            fm, _ = journal_fm.split_frontmatter(note.read_text())
+            if (journal_fm.get_field(fm, "status") or "") == "closed":
+                pdf = note.with_suffix(".pdf")
+                out.append({"name": note.stem, "path": str(pdf if pdf.exists() else note),
+                            "status": "closed", "size": journal_fm.get_field(fm, "size"),
+                            "pages": int(journal_fm.get_field(fm, "pages") or 0)})
     return out
 
 
@@ -778,6 +790,59 @@ def finish(nb: Path, finished: str | None = None) -> dict:
     return {"notebook": nb.name, "finished": finished, "pdf": pdf, "status": status(nb)}
 
 
+def _expected_entry(name: str, nb: Path) -> bool:
+    """Files close() may delete: everything this tool creates in a notebook."""
+    return (name in (MANIFEST, ORIGINALS, LOCKFILE, index_note(nb).name, pdf_path(nb).name)
+            or bool(_FILE_RE.match(name))
+            or name.startswith(".rebuild-")
+            or name.startswith(f".{pdf_path(nb).name}.")      # _atomic_write temp
+            or name.startswith(f".{index_note(nb).name}."))
+
+
+def close(nb: Path, confirm: bool = False, closed: str | None = None) -> dict:
+    """Close out a FINISHED notebook — irreversible: final PDF compile, PDF and
+    index note move up to the notebooks root (note links the PDF, status:
+    closed), and the folder with its page images, originals and manifest is
+    deleted. Pages can no longer be fixed or rebuilt afterwards."""
+    if not confirm:
+        raise NotebookError("closing deletes the page images and originals for good; "
+                            "pass confirm to proceed")
+    root = nb.parent
+    fm = _fm_of(nb)
+    if (journal_fm.get_field(fm, "status") or "") != "finished":
+        raise NotebookError(f"{nb.name} isn't finished; finish it first (closing is a separate, later step)")
+    unexpected = sorted(e.name for e in nb.iterdir() if not _expected_entry(e.name, nb))
+    if unexpected:
+        raise NotebookError(f"{nb.name} holds files this tool didn't create: {unexpected}; "
+                            "move them out first")
+    dest_pdf, dest_note = root / pdf_path(nb).name, root / index_note(nb).name
+    clash = [str(p.name) for p in (dest_pdf, dest_note) if p.exists()]
+    if clash:
+        raise NotebookError(f"already in {root.name}/: {clash}")
+    closed = closed or _today()
+    with locked(nb):
+        man = load_manifest(nb)
+        pdf = compile_pdf(nb, man)
+        if not pdf["pdf"]:
+            raise NotebookError("no pages to compile; nothing to close out")
+        pages = status(nb)
+        note = index_note(nb)
+        text = _patch_frontmatter(note.read_text(), {"status": "closed", "closed": closed})
+        link = f"PDF: [[{dest_pdf.name}]]"
+        if link not in text:
+            text, n = re.subn(r"^(# .*)$", lambda m: f"{m.group(1)}\n\n{link}", text, count=1,
+                              flags=re.M)
+            if not n:
+                text = text.rstrip("\n") + f"\n\n{link}\n"
+        note.write_text(text)
+        os.replace(pdf_path(nb), dest_pdf)
+        os.replace(note, dest_note)
+    shutil.rmtree(nb)
+    return {"notebook": nb.name, "closed": closed, "pdf": str(dest_pdf), "note": str(dest_note),
+            "pages": pages["pages"], "cover": pages["cover"], "back": pages["back"],
+            "deleted": str(nb)}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -832,6 +897,10 @@ def main(argv=None) -> int:
     p.add_argument("size", help="passport | regular | field-notes | WxHmm | WxHin")
     p.add_argument("--notebook")
 
+    p = sub.add_parser("close", help="close out a finished notebook (irreversible)")
+    p.add_argument("--notebook", required=True)
+    p.add_argument("--confirm", action="store_true")
+
     for name in ("status", "compile", "finish"):
         p = sub.add_parser(name)
         p.add_argument("--notebook")
@@ -865,6 +934,8 @@ def main(argv=None) -> int:
             if a.no_dewarp:
                 ov["dewarp"] = False
             _out(reprocess(find_notebook(a.notebook), a.page, **ov))
+        elif a.cmd == "close":
+            _out(close(find_notebook(a.notebook), a.confirm))
         elif a.cmd == "set-size":
             _out(set_size(find_notebook(a.notebook), a.size))
         elif a.cmd == "status":

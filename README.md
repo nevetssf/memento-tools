@@ -261,6 +261,7 @@ for the conversion. Useful for old web clippings that Obsidian can't render usef
 ./.venv/bin/python3 notebook.py transcribe 12 --text-file page12.txt
 ./.venv/bin/python3 notebook.py status | reprocess N [...] | rebuild | finish
 ./.venv/bin/python3 notebook.py set-size field-notes          # fix a wrong size; re-renders all pages
+./.venv/bin/python3 notebook.py close --notebook NAME --confirm   # after finish: archive to PDF + note
 ```
 
 Each notebook is `Notebooks/<started> <name>/` with an index note (frontmatter +
@@ -302,6 +303,13 @@ original is deleted when no page references it any more. `.notebook.json` record
 each page's original and processing parameters, so `rebuild` redoes the whole
 notebook when the image pipeline improves, and `reprocess` redoes one page with
 different parameters (rotation, manual corners, stronger bleed suppression, ...).
+
+**Closing out** (`close`, a separate step after `finish`, irreversible and gated on
+`--confirm`): final compile, then the PDF and the index note move up to
+`Notebooks/<folder>.pdf` / `.md` (the note gets a link to the PDF and `status: closed`)
+and the folder — page images, originals, manifest — is deleted. It refuses if the
+notebook isn't finished, if the folder holds files the tool didn't create, or if
+either destination already exists. `list` still shows closed notebooks.
 
 All notebook writes take an flock on `<notebook>/.notebook.lock`; the index note is
 only ever patched (frontmatter fields by regex, one page section at a time). System
