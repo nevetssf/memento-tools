@@ -387,6 +387,35 @@ Smoke tests for `people.py` (relationship inference) and `priorities.py`.
 - **Hash-based dedup and move detection** — files renamed without content changes
   are recognized as moves and don't trigger re-embedding.
 
+## Face recognition (`faces.py`)
+
+Local face recognition over the journal photo archive. Added 2026-10-02.
+
+- **Models:** InsightFace `buffalo_l` (RetinaFace detection + ArcFace embeddings),
+  CPU-only via onnxruntime. Model files auto-download to `~/.insightface/models/`
+  on first run. Everything runs and stays local — no cloud APIs.
+- **Storage:** `faces.db` (SQLite) — `people` (name + people-db id), `faces`
+  (embedding BLOB, bbox, source photo, person/cluster assignment, ignored flag),
+  `scanned` (processed-photo ledger, makes re-scans incremental).
+- **Design:** match-only. Unknown faces are never named, stored against a person,
+  or auto-enrolled. Match threshold is 0.45 cosine similarity (conservative — a
+  false "that's Harper" in the journal is worse than a miss). Enrollment is
+  manual: cluster unlabeled faces, render contact sheets to `faces-review/`,
+  Steven confirms who's who.
+
+```
+.venv/bin/python3 faces.py scan [--dir DIR]   # embed faces in new photos (default: Journal/*/photos)
+.venv/bin/python3 faces.py cluster            # cluster unlabeled faces → faces-review/cluster-NN.jpg
+.venv/bin/python3 faces.py label 3 "Name" --people-db-id 42
+.venv/bin/python3 faces.py ignore 5           # cluster is strangers/junk
+.venv/bin/python3 faces.py identify photo.jpg # JSON: who's in this photo
+.venv/bin/python3 faces.py people             # enrolled people + face counts
+```
+
+Wired into the OpenClaw photolog flow (`workspace/skills/photolog/SKILL.md`):
+every inbound photo is identified before logging, recognized names are woven
+into the journal entry description and added to the day's `people:` frontmatter.
+
 ## License
 
 Personal use. No warranty. Patches welcome via GitHub issues.
