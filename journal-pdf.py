@@ -229,7 +229,7 @@ def compress_photo(filepath):
     try:
         img = Image.open(filepath)
         is_portrait = img.height > img.width
-        img.thumbnail((MAX_IMG_WIDTH, MAX_IMG_WIDTH), Image.LANCZOS)
+        img.thumbnail((MAX_IMG_WIDTH, MAX_IMG_WIDTH), Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
         b64 = base64.b64encode(buf.getvalue()).decode()

@@ -41,7 +41,7 @@ class TestQualifyLocation(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(qualify_location(""), "")
-        self.assertEqual(qualify_location(None), None)
+        self.assertEqual(qualify_location(None), None)  # pyright: ignore[reportArgumentType]  # deliberate: defensive None handling
 
     def test_non_state_two_letter_token_untouched(self):
         # "BC" is a Canadian province, not a US state - leave it alone.

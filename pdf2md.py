@@ -80,6 +80,7 @@ def extract_pymupdf4llm(pdf_path: Path) -> tuple[str, dict]:
     import pymupdf4llm
     import fitz
     text = pymupdf4llm.to_markdown(str(pdf_path))
+    assert isinstance(text, str)  # list only when page_chunks=True
     doc = fitz.open(str(pdf_path))
     meta = {k: v for k, v in (doc.metadata or {}).items() if v}
     meta["page_count"] = doc.page_count
@@ -95,7 +96,7 @@ def extract_vision(pdf_path: Path) -> tuple[str, dict]:
     meta["page_count"] = doc.page_count
 
     pages = []
-    for i, page in enumerate(doc, start=1):
+    for i, page in enumerate(doc.pages(), start=1):
         pix = page.get_pixmap(dpi=150)
         png_bytes = pix.tobytes("png")
         b64 = base64.b64encode(png_bytes).decode()
@@ -297,7 +298,7 @@ def convert_pdf(pdf_path: Path, *, force: bool = False,
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").strip().splitlines()[0])
     parser.add_argument("paths", nargs="*",
                         help="Specific PDFs to convert (default: every PDF in the vault)")
     parser.add_argument("--force", action="store_true",

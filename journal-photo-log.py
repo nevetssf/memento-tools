@@ -114,7 +114,7 @@ def extract_metadata(image_path):
         from PIL.ExifTags import TAGS
         img = Image.open(image_path)
         metadata["Dimensions"] = f"{img.size[0]}x{img.size[1]}"
-        exif = img._getexif()
+        exif = img._getexif()  # pyright: ignore[reportAttributeAccessIssue]  # JPEG-only; includes Exif sub-IFD unlike getexif()
         if exif:
             for k, v in exif.items():
                 tag = TAGS.get(k, k)

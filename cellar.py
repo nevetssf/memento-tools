@@ -572,6 +572,8 @@ def append_bottle_note(con: sqlite3.Connection, bottle: str | int, text: str,
     rel = b["obsidian_file"]
     if not rel:
         prow = get_producer(con, b["producer_id"])
+        if prow is None:
+            raise KeyError(f"No producer with id {b['producer_id']!r}")
         rel = bottle_note_path(b["type"], prow["name"], b["name"])
     fm = _frontmatter_for(
         "bottle", db_id=b["id"], producer_id=b["producer_id"],
@@ -591,6 +593,8 @@ def read_bottle_note(con: sqlite3.Connection, bottle: str | int,
     rel = b["obsidian_file"]
     if not rel:
         prow = get_producer(con, b["producer_id"])
+        if prow is None:
+            raise KeyError(f"No producer with id {b['producer_id']!r}")
         rel = bottle_note_path(b["type"], prow["name"], b["name"])
     return {"path": rel, "content": read_note(rel)}
 

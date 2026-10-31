@@ -47,7 +47,7 @@ _model_lock = threading.Lock()   # torch already uses every core; serialize infe
 
 def load_model():
     global _model
-    from sentence_transformers import SentenceTransformer
+    from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]  # installed in .venv-embed only
     t = time.time()
     _model = SentenceTransformer(
         EMBED_SERVER_MODEL,
@@ -61,16 +61,19 @@ def load_model():
 
 
 def encode(texts: list[str], input_type: str | None, dim: int) -> list[list[float]]:
-    kwargs = dict(batch_size=BATCH_SIZE, truncate_dim=dim, normalize_embeddings=True,
-                  convert_to_numpy=True, show_progress_bar=False)
+    model = _model
+    if model is None:
+        raise RuntimeError("embedding model not loaded")
+    if input_type == "query":
+        fn = model.encode_query
+    elif input_type == "document":
+        fn = model.encode_document
+    else:
+        fn = model.encode
     with _model_lock:
-        if input_type == "query":
-            vecs = _model.encode_query(texts, **kwargs)
-        elif input_type == "document":
-            vecs = _model.encode_document(texts, **kwargs)
-        else:
-            vecs = _model.encode(texts, **kwargs)
-    return vecs.tolist()
+        vecs = fn(texts, batch_size=BATCH_SIZE, truncate_dim=dim, normalize_embeddings=True,
+                  convert_to_numpy=True, show_progress_bar=False)
+    return vecs.tolist()  # pyright: ignore[reportAttributeAccessIssue]  # ndarray when convert_to_numpy=True
 
 
 class BadRequest(Exception):
@@ -160,8 +163,8 @@ class Handler(BaseHTTPRequestHandler):
             "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
         })
 
-    def log_message(self, fmt, *args):
-        log.debug("%s " + fmt, self.address_string(), *args)
+    def log_message(self, format, *args):  # noqa: A002 — name must match BaseHTTPRequestHandler
+        log.debug("%s " + format, self.address_string(), *args)
 
 
 def main():

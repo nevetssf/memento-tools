@@ -29,6 +29,7 @@ import re
 import sqlite3
 import sys
 from collections import deque
+from typing import NoReturn
 from datetime import datetime, timezone
 from pathlib import Path as _Path
 
@@ -176,7 +177,7 @@ def out(data, pretty=False):
         print(json.dumps(data, default=str))
 
 
-def err(msg, code=1):
+def err(msg, code=1) -> NoReturn:
     print(json.dumps({"error": msg}), file=sys.stderr)
     sys.exit(code)
 

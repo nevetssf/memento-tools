@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -190,7 +191,7 @@ class PeopleTestCase(unittest.TestCase):
         defaults.update(kwargs)
         return SimpleNamespace(**defaults)
 
-    def run_cmd(self, fn, capture_stdout=True, **kwargs):
+    def run_cmd(self, fn, **kwargs) -> Any:
         """
         Call a cmd_* function, capture stdout, return parsed JSON.
         Raises SystemExit if the command calls err().

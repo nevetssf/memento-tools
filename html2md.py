@@ -78,10 +78,10 @@ def extract(html_text: str) -> tuple[str, dict]:
         meta["title"] = soup.title.string.strip()
     desc = soup.find("meta", attrs={"name": "description"})
     if desc and desc.get("content"):
-        meta["description"] = desc["content"].strip()
+        meta["description"] = str(desc["content"]).strip()
     author = soup.find("meta", attrs={"name": "author"})
     if author and author.get("content"):
-        meta["author"] = author["content"].strip()
+        meta["author"] = str(author["content"]).strip()
 
     # Remove non-content elements
     for tag in soup(STRIP_TAGS):
@@ -176,7 +176,7 @@ def convert_html(html_path: Path, *, force: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").strip().splitlines()[0])
     parser.add_argument("paths", nargs="*",
                         help="Specific HTML files to convert (default: every HTML in the vault)")
     parser.add_argument("--force", action="store_true",

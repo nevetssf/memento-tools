@@ -38,6 +38,7 @@ import sys
 from collections import Counter
 from datetime import date as _date, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import JOURNAL_DIR, LOCATION_FILE, VAULT_DIR
@@ -435,7 +436,7 @@ def _out(data) -> None:
     sys.exit(0)
 
 
-def _err(msg: str) -> None:
+def _err(msg: str) -> NoReturn:
     print(json.dumps({"error": msg}), file=sys.stderr)
     sys.exit(1)
 
