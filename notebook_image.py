@@ -790,6 +790,126 @@ def fit_full_frame(img, out_w, out_h, keep_aspect):
 
 
 # ---------------------------------------------------------------------------
+# Object (cover) detection — any colour, not just bright paper
+# ---------------------------------------------------------------------------
+
+OBJECT_SCALE_PX = 640
+
+
+def _mask_grabcut(small):
+    """Foreground from GrabCut seeded with a centred box (the subject is
+    assumed not to touch the outer 4% of the frame)."""
+    h, w = small.shape[:2]
+    m = max(4, int(0.04 * min(h, w)))
+    mask = np.zeros((h, w), np.uint8)
+    bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(small, mask, (m, m, w - 2 * m, h - 2 * m), bgd, fgd, 4, cv2.GC_INIT_WITH_RECT)
+    except cv2.error:
+        return None
+    return np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+
+
+def _mask_center_cluster(small, k=3):
+    """Colour clusters (Lab k-means); keep the cluster owning the centre."""
+    h, w = small.shape[:2]
+    lab = cv2.cvtColor(cv2.GaussianBlur(small, (0, 0), 2), cv2.COLOR_BGR2LAB)
+    data = lab.reshape(-1, 3).astype(np.float32)
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    labels0 = np.zeros((data.shape[0], 1), np.int32)
+    _, labels, _ = cv2.kmeans(data, k, labels0, crit, 2, cv2.KMEANS_PP_CENTERS)
+    labels = labels.reshape(h, w)
+    c = labels[int(h * .35):int(h * .65), int(w * .35):int(w * .65)]
+    centre = int(np.bincount(c.ravel(), minlength=k).argmax())
+    return np.where(labels == centre, 255, 0).astype(np.uint8)
+
+
+def _mask_edges(small):
+    """Region enclosed by strong edges, filled."""
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = cv2.bilateralFilter(gray, 7, 40, 7)
+    med = float(np.median(gray))
+    edges = cv2.Canny(gray, int(max(0, 0.66 * med)), int(min(255, 1.33 * med)))
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask = np.zeros_like(gray)
+    for c in contours:
+        cv2.drawContours(mask, [cv2.convexHull(c)], -1, 255, cv2.FILLED)
+    return mask
+
+
+def _score_object_mask(mask, page_aspect):
+    """Best quad in a candidate mask and how plausible it is as the cover.
+    Returns (score, quad, detail) or None."""
+    h, w = mask.shape
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    c = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    frac = area / float(h * w)
+    if not 0.08 <= frac <= 0.97:
+        return None
+    filled = np.zeros_like(mask)
+    cv2.drawContours(filled, [c], -1, 255, cv2.FILLED)
+    res = quad_from_mask(filled)
+    if res is None:
+        return None
+    quad, fallback = res
+    q_area = cv2.contourArea(quad.astype(np.float32))
+    rect_fit = min(area, q_area) / max(area, q_area)
+    ul, ur, lr, ll = quad
+    qw = (np.linalg.norm(ur - ul) + np.linalg.norm(lr - ll)) / 2
+    qh = (np.linalg.norm(ll - ul) + np.linalg.norm(lr - ur)) / 2
+    a = qw / max(qh, 1e-6)
+    # portrait or sideways both acceptable; the cover may overhang the pages
+    adiff = min(abs(math.log(a / page_aspect)), abs(math.log(a * page_aspect)))
+    aspect_score = math.exp(-adiff / 0.2)
+    # touching the frame border usually means a wrong (background) region
+    border = 0.9 if (quad[:, 0].min() < 2 or quad[:, 1].min() < 2 or
+                     quad[:, 0].max() > w - 3 or quad[:, 1].max() > h - 3) else 1.0
+    score = rect_fit ** 3 * aspect_score * border * (0.8 if fallback else 1.0)
+    return score, quad, {"rect_fit": round(rect_fit, 3), "aspect": round(a, 3),
+                         "area": round(frac, 3)}
+
+
+def detect_object_quad(img, page_aspect: float, min_score: float = 0.45):
+    """Quad of the notebook (e.g. a dark leather cover) as an object of any
+    colour — for covers, where the paper detector finds nothing or only a
+    pale label. Tries GrabCut, colour clustering and edges; keeps the most
+    rectangular, page-shaped result. Returns (quad, info) in full-res
+    coordinates, or None."""
+    h, w = img.shape[:2]
+    scale = float(OBJECT_SCALE_PX) / max(h, w)
+    small = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    best = None
+    for name, fn in (("grabcut", _mask_grabcut), ("colour", _mask_center_cluster),
+                     ("edges", _mask_edges)):
+        mask = fn(small)
+        if mask is None:
+            continue
+        sc = _score_object_mask(mask, page_aspect)
+        if sc and (best is None or sc[0] > best[0]):
+            best = (sc[0], sc[1], {**sc[2], "method": name})
+    if best is None or best[0] < min_score:
+        return None
+    score, quad, detail = best
+    quad = order_corners(quad / scale)
+    # a sideways cover: start the corner order one step later so the warp
+    # turns it upright (90 degrees; the reviewer may still need a flip)
+    ul, ur, lr, ll = quad
+    qw = (np.linalg.norm(ur - ul) + np.linalg.norm(lr - ll)) / 2
+    qh = (np.linalg.norm(ll - ul) + np.linalg.norm(lr - ur)) / 2
+    if (qw > qh) != (page_aspect > 1):
+        quad = np.roll(quad, 1, axis=0)
+        detail["sideways"] = True
+    detail["score"] = round(score, 3)
+    return quad.astype(np.float32), detail
+
+
+# ---------------------------------------------------------------------------
 # Quality checks
 # ---------------------------------------------------------------------------
 
@@ -816,6 +936,11 @@ def quality_flags(gray, pmask, info, side):
     flags = []
     if info.get("quad_fallback"):
         flags.append("page outline was fitted as a plain rectangle; check the corners")
+    if info.get("mode") == "object":
+        if info.get("score", 1) < 0.65:
+            flags.append(f"cover outline is uncertain (score {info['score']}); check the corners")
+        if info.get("sideways"):
+            flags.append("cover was sideways and turned 90 degrees; it may need a flip")
     if info.get("spine") == "centre-cut":
         flags.append("no fold found; spread was split at the centre")
     inner = {"left": "right", "right": "left"}.get(side or "")
@@ -846,6 +971,7 @@ class PageParams:
     dewarp: bool = True
     bleed: float = 1.0               # show-through suppression (0 = off)
     flip: bool = False              # rotate the finished page 180
+    object: bool = False            # detect the notebook as an object of any colour (covers)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "PageParams":
@@ -881,6 +1007,15 @@ def process_page(img: np.ndarray, params: PageParams, out_w: int, out_h: int):
         if params.corners:
             quad = order_corners(params.corners)
             info["mode"] = "manual corners"
+        elif params.object:
+            res = detect_object_quad(img, out_w / out_h)
+            if res is None:
+                raise ValueError("couldn't find the notebook in the photo; pass manual corners")
+            quad, det = res
+            info.update(det)
+            info["mode"] = "object"
+            centroid = quad.mean(axis=0)
+            quad = centroid + (quad - centroid) * 1.01
         else:
             res = detect_page_quad(img, half=params.half, seed=params.seed,
                                    two_blob=params.two_blob, page_aspect=out_w / out_h)
@@ -902,7 +1037,9 @@ def process_page(img: np.ndarray, params: PageParams, out_w: int, out_h: int):
         Ms = cv2.getPerspectiveTransform((quad * scale).astype(np.float32),
                                          _dst_rect(out_w, out_h))
         pmask = cv2.warpPerspective(mask, Ms, (out_w, out_h), flags=cv2.INTER_NEAREST)
-        if params.dewarp and not params.corners:
+        if params.object:
+            pmask = None                    # paper mask means nothing for a cover
+        elif params.dewarp and not params.corners:
             page, pmask, dinfo = dewarp_curl(page, pmask)
             info.update(dinfo)
 

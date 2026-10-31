@@ -72,7 +72,9 @@ async def list_tools() -> list[types.Tool]:
                           "description": "Clockwise rotation to apply first (only if auto-detection got it wrong)"},
                "layout": {"type": "string", "enum": ["auto", "single", "spread"],
                           "description": "Override single/spread detection"},
-               "cover": {"type": "boolean", "description": "These sources are the cover (keep colour)"}},
+               "cover": {"type": "boolean",
+                         "description": "These sources are the front/back cover: kept in colour, and the "
+                                        "notebook is found as an object of any colour (dark leather is fine)"}},
               ["sources"]),
         _tool("notebook_file",
               "File reviewed candidates as pages. Replaces existing pages with the same number "
@@ -107,7 +109,9 @@ async def list_tools() -> list[types.Tool]:
                "flip": {"type": "boolean"},
                "bleed": {"type": "number", "description": "Show-through suppression 0-3 (default 1)"},
                "dewarp": {"type": "boolean"},
-               "color": {"type": "boolean"}},
+               "color": {"type": "boolean"},
+               "object": {"type": "boolean",
+                          "description": "Find the notebook as an object of any colour (dark/coloured covers)"}},
               ["page"]),
         _tool("notebook_status",
               "Pages present, gaps, pages missing a transcription, pages without a stored original.",
@@ -153,7 +157,7 @@ def _dispatch(name: str, a: dict):
         return nbk.transcribe(nbk.find_notebook(a.get("notebook")), a["page"], a["text"],
                               a.get("heading_note"))
     if name == "notebook_reprocess":
-        keys = ("rotate", "half", "corners", "seed", "flip", "bleed", "dewarp", "color")
+        keys = ("rotate", "half", "corners", "seed", "flip", "bleed", "dewarp", "color", "object")
         return nbk.reprocess(nbk.find_notebook(a.get("notebook")), a["page"],
                              **{k: a[k] for k in keys if k in a})
     if name == "notebook_status":
