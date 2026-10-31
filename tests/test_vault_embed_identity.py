@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
 from unittest import mock
 
@@ -175,7 +176,7 @@ class TestEnrichWhenChatModelDown(IdentityTestBase):
         with mock.patch.object(ve, "_post_json", side_effect=urllib.error.URLError("No route to host")):
             with self.assertRaises(ve.ChatUnreachable):
                 ve.chat("x")
-        http_err = urllib.error.HTTPError("u", 404, "model not found", {}, None)
+        http_err = urllib.error.HTTPError("u", 404, "model not found", Message(), None)
         with mock.patch.object(ve, "_post_json", side_effect=http_err):
             with self.assertRaises(urllib.error.HTTPError):
                 ve.chat("x")

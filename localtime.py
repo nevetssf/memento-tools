@@ -34,9 +34,10 @@ Resolution order:
 import json
 import re
 import sys
-import urllib.request
 import urllib.error
-from datetime import datetime
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -246,7 +247,7 @@ def _tz_from_coords(lat, lon):
 
 def _geocode_nominatim(query):
     """Geocode via Nominatim (OpenStreetMap). Returns (display_name, iana_zone) or None."""
-    encoded = urllib.request.quote(query)
+    encoded = urllib.parse.quote(query)
     url = (
         f"https://nominatim.openstreetmap.org/search"
         f"?q={encoded}&format=json&limit=1&accept-language=en"
@@ -273,7 +274,7 @@ def _geocode_nominatim(query):
 
 def _geocode_openmeteo(query):
     """Geocode via Open-Meteo. Returns (display_name, iana_zone) or None."""
-    encoded = urllib.request.quote(query)
+    encoded = urllib.parse.quote(query)
     url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=1&language=en"
     try:
         resp = json.loads(urllib.request.urlopen(url, timeout=5).read())
@@ -317,7 +318,7 @@ def get_localtime(location=None, zone=None):
     tz = ZoneInfo(iana)
     now = datetime.now(tz)
 
-    utc_offset_secs = now.utcoffset().total_seconds()
+    utc_offset_secs = (now.utcoffset() or timedelta(0)).total_seconds()
     sign = "+" if utc_offset_secs >= 0 else "-"
     h, m = divmod(abs(int(utc_offset_secs)), 3600)
     utc_offset = f"{sign}{h:02d}:{m // 60:02d}"

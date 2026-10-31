@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch, MagicMock
 
 import importlib.util
@@ -22,6 +23,7 @@ _spec = importlib.util.spec_from_file_location(
     "priorities_rollover",
     Path(__file__).parent.parent / "priorities-rollover.py",
 )
+assert _spec is not None and _spec.loader is not None
 PR = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(PR)
 
@@ -56,7 +58,7 @@ def run_cmd_set(path, labels):
     return path.read_text()
 
 
-def call_set(path, labels):
+def call_set(path, labels) -> tuple[str, Any]:
     """Run cmd_set and return (new_text, json_output)."""
     captured = []
     original_out = P._out
@@ -71,7 +73,7 @@ def call_set(path, labels):
     return path.read_text(), captured[0] if captured else None
 
 
-def call_done(path, query):
+def call_done(path, query) -> tuple[str, Any, Any]:
     """Run cmd_done and return (new_text, json_output_or_error)."""
     captured = []
     errors = []
@@ -89,7 +91,7 @@ def call_done(path, query):
     return path.read_text(), captured[0] if captured else None, errors[0] if errors else None
 
 
-def call_list(path):
+def call_list(path) -> Any:
     """Run cmd_list and return json_output."""
     captured = []
     def fake_out(data):

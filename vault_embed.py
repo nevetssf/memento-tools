@@ -410,7 +410,7 @@ def chunk_markdown(text: str) -> list[tuple[str, str]]:
                 current_h3 = ""
                 parts = [current_h1, current_h2] if current_h1 else [current_h2]
                 buf_heading = " > ".join(f"{'#' * (i + 1)} {p}" for i, p in enumerate(parts))
-            else:
+            elif h3:
                 current_h3 = h3.group(1).strip()
                 parts = [x for x in [current_h1, current_h2, current_h3] if x]
                 buf_heading = " > ".join(f"{'#' * (i + 1)} {p}" for i, p in enumerate(parts))
@@ -453,10 +453,10 @@ def chunk_pdf(path: Path) -> tuple[list[tuple[str, str, int]], dict]:
     """Returns ((heading, content, page_num) chunks, pdf_metadata)."""
     import fitz  # pymupdf
     doc = fitz.open(str(path))
-    meta = {k: v for k, v in doc.metadata.items() if v}
+    meta = {k: v for k, v in (doc.metadata or {}).items() if v}
     chunks = []
     title = meta.get("title") or path.stem
-    for i, page in enumerate(doc, start=1):
+    for i, page in enumerate(doc.pages(), start=1):
         text = page.get_text().strip()
         if not text:
             continue
@@ -485,7 +485,7 @@ def chunk_text(text: str, title: str = "") -> list[tuple[str, str]]:
 
 def chunk_html(html: str) -> tuple[list[tuple[str, str]], dict]:
     """Extract text from HTML and chunk by heading structure. Returns (chunks, metadata)."""
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, Tag
     soup = BeautifulSoup(html, "html.parser")
 
     # Metadata: title, description
@@ -494,10 +494,10 @@ def chunk_html(html: str) -> tuple[list[tuple[str, str]], dict]:
         meta["title"] = soup.title.string.strip()
     desc = soup.find("meta", attrs={"name": "description"})
     if desc and desc.get("content"):
-        meta["description"] = desc["content"].strip()
+        meta["description"] = str(desc["content"]).strip()
     author = soup.find("meta", attrs={"name": "author"})
     if author and author.get("content"):
-        meta["author"] = author["content"].strip()
+        meta["author"] = str(author["content"]).strip()
 
     # Strip non-content elements
     for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
@@ -507,6 +507,8 @@ def chunk_html(html: str) -> tuple[list[tuple[str, str]], dict]:
     body = soup.body or soup
     lines = []
     for el in body.descendants:
+        if not isinstance(el, Tag):
+            continue
         if el.name in ("h1", "h2", "h3", "h4"):
             level = int(el.name[1])
             text = el.get_text(strip=True)
@@ -767,6 +769,7 @@ def index_file(con: sqlite3.Connection, vault_path: Path, abs_path: Path,
         return {"status": "unchanged"}
 
     # --- Parse and chunk ---
+    fm: dict = {}
     if file_type == "md":
         text = raw_bytes.decode("utf-8", errors="replace")
         fm_text, body = split_frontmatter(text)
@@ -970,7 +973,7 @@ PDF_EXTS = {".pdf"}
 ALL_EXTS = TEXT_EXTS | PDF_EXTS
 
 
-def reconcile(con: sqlite3.Connection, vault_path: Path = None,
+def reconcile(con: sqlite3.Connection, vault_path: Path | None = None,
               skip_dirs: tuple[str, ...] = (".obsidian", ".trash", "Templates", "Reference"),
               *, report_progress: bool = True, file_filter: str = "all",
               extract_metadata_now: bool = True) -> dict:
@@ -1249,9 +1252,9 @@ def reembed(con: sqlite3.Connection, *, batch_size: int = 32,
 # ---------------------------------------------------------------------------
 
 def semantic_search(con: sqlite3.Connection, query: str, *,
-                    limit: int = 10, section: str = None,
-                    file_type: str = None, date_from: str = None,
-                    date_to: str = None) -> list[dict]:
+                    limit: int = 10, section: str | None = None,
+                    file_type: str | None = None, date_from: str | None = None,
+                    date_to: str | None = None) -> list[dict]:
     """Hybrid search: vector KNN merged with FTS5 keyword results."""
     check_index_identity(con, allow_partial=True)
     qvec = embed(query, input_type="query")

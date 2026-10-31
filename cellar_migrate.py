@@ -291,8 +291,9 @@ def migrate(con, *, vault_root: Path, dry_run: bool) -> dict:
                 country=_coerce_str(fm.get("country")),
                 website=_coerce_str(fm.get("website")),
             )
-            counts["producers"] += 1 if cdb.get_producer(con, producer_id)[
-                "created_at"] == cdb.get_producer(con, producer_id)["updated_at"] else 0
+            prow = cdb.get_producer(con, producer_id)
+            assert prow is not None
+            counts["producers"] += 1 if prow["created_at"] == prow["updated_at"] else 0
 
             # Producer-level prose → producer note
             producer_prose = extract_producer_prose(body)

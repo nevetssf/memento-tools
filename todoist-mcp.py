@@ -15,6 +15,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 from pathlib import Path
 
 from mcp import types
@@ -33,7 +34,7 @@ app = Server("todoist")
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _request(method: str, path: str, body: dict | None = None, params: dict | None = None) -> dict | list | None:
+def _request(method: str, path: str, body: dict | None = None, params: dict | None = None) -> Any:
     if not TODOIST_TOKEN:
         raise RuntimeError("MEMENTO_TODOIST_TOKEN not set — configure in openclaw.json env section")
     url = f"{API_BASE}{path}"
@@ -55,7 +56,7 @@ def _request(method: str, path: str, body: dict | None = None, params: dict | No
         raise RuntimeError(f"Todoist API {e.code}: {body_text}") from e
 
 
-def _get(path: str, **params) -> list | dict:
+def _get(path: str, **params) -> Any:
     """GET, auto-unwrapping {'results': [...]} list responses."""
     r = _request("GET", path, params=params or None)
     if isinstance(r, dict) and "results" in r and len(r) <= 3:
@@ -259,6 +260,8 @@ def _dispatch(name: str, args: dict) -> str:
         elif args.get("due_date"):
             body["due_date"] = args["due_date"]
         t = _post("/tasks", body)
+        if not isinstance(t, dict):
+            raise RuntimeError(f"Todoist create task returned {t!r}")
         return json.dumps({"ok": True, "task": _task_summary(t)})
 
     if name == "complete_task":
