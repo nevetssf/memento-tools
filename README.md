@@ -293,6 +293,13 @@ batches expire after 7 days) for review before anything touches the notebook:
   (straightens bowed top/bottom edges column by column — only the curvature, not the
   framing), illumination flattening, and **bleed-through suppression** (strength 1 by
   default; covers stay in colour with no suppression).
+- Covers (`--cover` / `cover: true`): the notebook is first found as an *object of any
+  colour* (`detect_object_quad`), since a leather or coloured cover isn't bright
+  paper. Three proposals compete — GrabCut seeded with a centred box, the Lab colour
+  cluster that owns the centre of the frame, and the region enclosed by strong edges —
+  scored on rectangularity and closeness to the page aspect (portrait or sideways;
+  sideways covers are turned upright). Fallbacks: paper detection, then the whole
+  frame. `reprocess --object` re-detects a filed cover this way.
 - Quality flags (writing reaching an edge, rectangle fallback, centre-cut spread,
   implausible curl) tell the reviewer where to look. Sideways shots can come out
   upside down — `flip` on filing fixes it exactly.

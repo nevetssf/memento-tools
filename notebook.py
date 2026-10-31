@@ -460,17 +460,20 @@ def ingest(nb: Path, sources: list[str], rotate: int = 0, layout: str = "auto",
     cands, problems = [], []
     n = 0
 
-    def add(original: Path, params: ni.PageParams, source: str, layout_note: str):
+    def add(original: Path, params: ni.PageParams, source: str, layout_note: str,
+            quiet: bool = False) -> bool:
         nonlocal n
-        n += 1
-        cid = f"c{n}"
+        cid = f"c{n + 1}"
         try:
             c = _render_candidate(bdir, cid, original, params, px)
         except ValueError as e:
-            problems.append({"source": source, "error": str(e)})
-            return
+            if not quiet:
+                problems.append({"source": source, "error": str(e)})
+            return False
+        n += 1
         c.update({"source": source, "original": original.name, "layout": layout_note})
         cands.append(c)
+        return True
 
     for src in sources:
         sp = Path(src).expanduser()
@@ -504,6 +507,12 @@ def ingest(nb: Path, sources: list[str], rotate: int = 0, layout: str = "auto",
             continue
         staged = bdir / "originals" / f"{_sha(sp)[:16]}{sp.suffix.lower() or '.jpg'}"
         shutil.copyfile(sp, staged)
+        if cover and layout == "auto" and add(
+                staged, ni.PageParams(rotate=rotate, object=True, color=True, bleed=0),
+                sp.name, "cover: notebook found as an object", quiet=True):
+            # covers are often dark or coloured, not bright paper: find the
+            # notebook as an object first; paper detection is the fallback
+            continue
         img = ni.load_image(staged)
         lay = ni.classify_layout(ni.rotate(img, rotate), aspect)
         if layout == "single":
@@ -514,7 +523,7 @@ def ingest(nb: Path, sources: list[str], rotate: int = 0, layout: str = "auto",
             halves = lay.halves
         if not halves:
             if cover:
-                # a cover often isn't bright paper: keep the whole frame
+                # neither object nor paper detection found it: keep the whole frame
                 add(staged, ni.PageParams(rotate=rotate, full_frame=True, keep_aspect=True,
                                           color=True, bleed=0), sp.name, "cover, whole frame")
             else:
@@ -657,6 +666,10 @@ def reprocess(nb: Path, page, **overrides) -> dict:
                                       **{k: v for k, v in overrides.items() if v is not None}})
     if overrides.get("corners"):
         params.half, params.two_blob, params.seed, params.full_frame = None, False, None, False
+        params.object = False
+    elif overrides.get("object"):
+        params.half, params.two_blob, params.seed = None, False, None
+        params.full_frame = params.keep_aspect = False
     _prune_staging()
     batch_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
     bdir = _staging_root() / batch_id
@@ -892,6 +905,8 @@ def main(argv=None) -> int:
     p.add_argument("--bleed", type=float)
     p.add_argument("--no-dewarp", action="store_true")
     p.add_argument("--color", action="store_true", default=None)
+    p.add_argument("--object", action="store_true", default=None,
+                   help="find the notebook as an object of any colour (covers)")
 
     p = sub.add_parser("set-size")
     p.add_argument("size", help="passport | regular | field-notes | WxHmm | WxHin")
@@ -928,7 +943,7 @@ def main(argv=None) -> int:
             _out(transcribe(find_notebook(a.notebook), a.page, text, a.heading_note))
         elif a.cmd == "reprocess":
             ov = {"rotate": a.rotate, "half": a.half, "flip": a.flip, "bleed": a.bleed,
-                  "color": a.color,
+                  "color": a.color, "object": a.object,
                   "seed": [int(v) for v in a.seed.split(",")] if a.seed else None,
                   "corners": [[int(v) for v in c.split(",")] for c in a.corners] if a.corners else None}
             if a.no_dewarp:

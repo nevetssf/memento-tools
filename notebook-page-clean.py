@@ -11,7 +11,7 @@ Usage:
                          [--seed X,Y]
                          [--corners ULx,ULy URx,URy LRx,LRy LLx,LLy]
                          [--full-frame [--keep-aspect]] [--color]
-                         [--no-dewarp] [--bleed N] [--flip]
+                         [--no-dewarp] [--bleed N] [--flip] [--object]
                          [--auto]
 
   --rotate   clockwise, applied first (sideways photos; verify output).
@@ -32,6 +32,8 @@ Usage:
              don't straighten page curl.
   --bleed N  show-through suppression strength (default 1; 0 = off).
   --flip     rotate the finished page 180 degrees.
+  --object   find the notebook as an object of any colour instead of bright
+             paper (dark or coloured covers); implies --color.
   --auto     classify the photo (single/spread/sideways) and write every
              page found as DST-<n>.jpg; prints what it decided.
 """
@@ -61,6 +63,7 @@ def main():
     ap.add_argument("--bleed", type=float, default=1.0)
     ap.add_argument("--flip", action="store_true")
     ap.add_argument("--auto", action="store_true")
+    ap.add_argument("--object", action="store_true")
     args = ap.parse_args()
     if args.spread and not args.half:
         sys.exit("--spread requires --half left|right")
@@ -76,7 +79,8 @@ def main():
         half=args.half,
         seed=[int(v) for v in args.seed.split(",")] if args.seed else None,
         corners=[[int(v) for v in c.split(",")] for c in args.corners] if args.corners else None,
-        full_frame=args.full_frame, keep_aspect=args.keep_aspect, color=args.color,
+        full_frame=args.full_frame, keep_aspect=args.keep_aspect,
+        color=args.color or args.object, object=args.object,
         dewarp=not args.no_dewarp, bleed=args.bleed, flip=args.flip,
     )
 

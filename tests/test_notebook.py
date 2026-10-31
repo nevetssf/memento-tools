@@ -96,6 +96,42 @@ def partial_facing(keep="left"):
     return img
 
 
+def wood_table(h=1600, w=1200, seed=0):
+    rng = np.random.default_rng(seed)
+    xs = np.arange(w)[None, :]
+    grain = (np.sin(xs / 9.0 + rng.normal(0, 0.3, (h, 1))) * 12).astype(np.float32)
+    img = np.dstack([140 + grain, 175 + grain, 205 + grain]).clip(0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(img, (0, 0), 1.5)
+
+
+COVER_QUAD = [[300, 260], [880, 300], [900, 1300], [270, 1270]]
+
+
+def dark_cover(table=None, quad=COVER_QUAD, colour=(35, 50, 80), band=True):
+    """A dark leather notebook cover (with label and elastic band) on a table."""
+    img = wood_table() if table is None else table
+    rng = np.random.default_rng(7)
+    q = np.asarray(quad, np.int32)
+    m = np.zeros(img.shape[:2], np.uint8)
+    cv2.fillPoly(m, [q], 255)
+    tex = (np.full(img.shape, colour, np.float32)
+           + rng.normal(0, 7, img.shape[:2] + (1,))).clip(0, 255).astype(np.uint8)
+    img[m > 0] = tex[m > 0]
+    c = q.mean(axis=0).astype(int)
+    cv2.rectangle(img, (c[0] - 120, c[1] - 260), (c[0] + 60, c[1] - 200), (205, 210, 215), -1)
+    if band:
+        bx = int((q[1][0] + q[2][0]) / 2 - 60)
+        cv2.line(img, (bx, q[1][1] - 5), (bx, q[2][1] + 5), (20, 20, 20), 9)
+    return img
+
+
+def corner_error(quad, truth):
+    """Worst corner distance as a fraction of the truth's diagonal (order-free)."""
+    truth = np.asarray(truth, np.float32)
+    worst = max(min(np.linalg.norm(p - g) for g in truth) for p in quad)
+    return worst / np.linalg.norm(np.ptp(truth, axis=0))
+
+
 def dark_fraction(page):
     return float((page < 60).mean())
 
@@ -157,6 +193,40 @@ class TestLayout(unittest.TestCase):
 
     def test_no_paper(self):
         self.assertEqual(ni.classify_layout(_table(), PAGE_ASPECT).kind, "none")
+
+
+class TestCoverDetection(unittest.TestCase):
+    ASPECT = 1050 / 1650
+
+    def test_dark_cover_on_wood(self):
+        res = ni.detect_object_quad(dark_cover(), self.ASPECT)
+        assert res is not None
+        self.assertLess(corner_error(res[0], COVER_QUAD), 0.03)
+
+    def test_black_cover_on_white_desk(self):
+        desk = np.full((1600, 1200, 3), 232, np.uint8)
+        res = ni.detect_object_quad(dark_cover(desk, colour=(28, 28, 30)), self.ASPECT)
+        assert res is not None
+        self.assertLess(corner_error(res[0], COVER_QUAD), 0.03)
+
+    def test_sideways_cover_turned_upright(self):
+        quad = [[220, 420], [1180, 380], [1210, 1000], [200, 1040]]
+        img = dark_cover(wood_table(1400, 1400), quad, band=False)
+        res = ni.detect_object_quad(img, self.ASPECT)
+        assert res is not None
+        q, info = res
+        self.assertTrue(info.get("sideways"))
+        self.assertLess(corner_error(q, quad), 0.03)
+        page, pinfo = ni.process_page(img, ni.PageParams(object=True, color=True, bleed=0), 1050, 1650)
+        self.assertEqual(page.shape, (1650, 1050, 3))
+        self.assertTrue(any("sideways" in f for f in pinfo["flags"]))
+
+    def test_nothing_rectangular(self):
+        rng = np.random.default_rng(3)
+        noise = rng.integers(0, 255, (1200, 900, 3), dtype=np.uint8)
+        self.assertIsNone(ni.detect_object_quad(noise, self.ASPECT))
+        with self.assertRaises(ValueError):
+            ni.process_page(noise, ni.PageParams(object=True), 1050, 1650)
 
 
 class TestProcess(unittest.TestCase):
@@ -457,6 +527,18 @@ class TestNotebookFlow(unittest.TestCase):
         with self.assertRaises(nbk.NotebookError):
             nbk.close(self.nb, confirm=True)
         self.assertTrue((self.nb / "page-001.jpg").exists())
+
+    def test_cover_photo_found_as_object(self):
+        cv2.imwrite(str(self.photos / "cover.jpg"), dark_cover())
+        b = nbk.ingest(self.nb, [str(self.photos / "cover.jpg")], cover=True)
+        self.assertEqual(len(b["candidates"]), 1)
+        c = b["candidates"][0]
+        self.assertTrue(c["params"].get("object"))
+        self.assertTrue(c["params"].get("color"))
+        nbk.file_pages(b["id"], [{"candidate": "c1", "page": "cover"}])
+        self.assertTrue((self.nb / "page-000-cover.jpg").exists())
+        rb = nbk.reprocess(self.nb, "cover", flip=True)
+        self.assertTrue(rb["candidates"][0]["params"].get("object"))
 
     def test_legacy_page_without_original(self):
         shutil.copyfile(self.photos / "single.jpg", self.nb / "page-005.jpg")
