@@ -399,7 +399,7 @@ Local face recognition over the journal photo archive. Added 2026-10-02.
   `scanned` (processed-photo ledger, makes re-scans incremental).
 - **Design:** match-only. Unknown faces are never named, stored against a person,
   or auto-enrolled. Match threshold is 0.45 cosine similarity (conservative — a
-  false "that's Harper" in the journal is worse than a miss). Enrollment is
+  false "that's <name>" in the journal is worse than a miss). Enrollment is
   manual: cluster unlabeled faces, render contact sheets to `faces-review/`,
   Steven confirms who's who.
 

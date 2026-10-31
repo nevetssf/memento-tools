@@ -7,3 +7,7 @@ localtime-aliases.json
 .chat_reconcile_state.json
 cellar-mcp.py.yaml-bak
 .venv-embed/
+# face recognition data: embeddings and contact sheets of real people
+faces.db
+faces.db.bak-*
+faces-review/
