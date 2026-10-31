@@ -757,6 +757,28 @@ def set_size(nb: Path, size: str) -> dict:
     return {**result, "old_size": old.get("label"), "new_size": label, "page_px": [w, h]}
 
 
+def _shared_originals(man: dict) -> list[list[str]]:
+    """Groups of pages that come from the same original (a spread photo)."""
+    by_orig: dict[str, list[str]] = {}
+    for pid, rec in man["pages"].items():
+        by_orig.setdefault(rec.get("original", ""), []).append(pid)
+    groups = [sorted(pids, key=page_sort_key) for o, pids in by_orig.items()
+              if o and len(pids) > 1]
+    return sorted(groups, key=lambda g: page_sort_key(g[0]))
+
+
+def _originals_note(man: dict) -> str:
+    n_pages = len(man["pages"])
+    n_orig = len(man["originals"])
+    shared = _shared_originals(man)
+    if not shared:
+        return f"{n_orig} originals for {n_pages} pages, one each"
+    groups = ", ".join("+".join(g) for g in shared)
+    return (f"{n_orig} originals for {n_pages} pages: {len(shared)} spread "
+            f"photo{'s' if len(shared) > 1 else ''} each serve two pages ({groups}); "
+            "this is expected, not a missing original")
+
+
 def status(nb: Path) -> dict:
     man = load_manifest(nb)
     fm = _fm_of(nb)
@@ -787,6 +809,8 @@ def status(nb: Path) -> dict:
         "untranscribed": sorted((p for p in on_disk if p not in written), key=page_sort_key),
         "no_original": sorted((p for p in on_disk if p not in man["pages"]), key=page_sort_key),
         "originals": len(man["originals"]),
+        "originals_note": _originals_note(man),
+        "shared_originals": _shared_originals(man),
         "pdf": str(pdf_path(nb)) if pdf_path(nb).exists() else None,
     }
 

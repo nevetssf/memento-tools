@@ -407,6 +407,8 @@ class TestNotebookFlow(unittest.TestCase):
         self.assertEqual(len(b["candidates"]), 2)
         self.assertEqual(r["status"]["pages"], [1, 2])
         self.assertEqual(r["status"]["originals"], 1)
+        self.assertEqual(r["status"]["shared_originals"], [["1", "2"]])
+        self.assertIn("each serve two pages (1+2)", r["status"]["originals_note"])
         self.assertEqual(len(list((self.nb / nbk.ORIGINALS).iterdir())), 1)
         self.assertTrue(nbk.pdf_path(self.nb).exists())
         self.assertIn("pages: 2", nbk.index_note(self.nb).read_text())
