@@ -13,6 +13,12 @@ embed without the DGX. Request fields:
 
 Also `GET /v1/models` and `GET /health`. Binds to loopback by default.
 
+Failover: with MEMENTO_EMBED_UPSTREAM_URL set (e.g. the GPU copy of this server on the
+DGX, same model + pinned revision, so vectors are interchangeable), document/untyped
+batches are forwarded upstream and embedded locally only if the upstream errors, times
+out, or returns a malformed response — after which it is skipped for a cooldown.
+Queries always run locally. Clients keep talking to this server and never see the switch.
+
 Runs from its own venv (torch is too heavy for the main one):
   uv venv -p 3.12 .venv-embed
   VIRTUAL_ENV=.venv-embed uv pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0+cpu
@@ -24,12 +30,15 @@ import logging
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     EMBED_SERVER_HOST, EMBED_SERVER_PORT, EMBED_SERVER_MODEL, EMBED_SERVER_MODEL_REVISION,
+    EMBED_SERVER_DEVICE, EMBED_UPSTREAM_URL, EMBED_UPSTREAM_TIMEOUT, EMBED_UPSTREAM_COOLDOWN,
 )
 
 MODEL_ID = EMBED_SERVER_MODEL.rsplit("/", 1)[-1]          # "voyage-4-nano"
@@ -53,11 +62,11 @@ def load_model():
         EMBED_SERVER_MODEL,
         revision=EMBED_SERVER_MODEL_REVISION,
         trust_remote_code=True,
-        device="cpu",
+        device=EMBED_SERVER_DEVICE,
     )
     _model.max_seq_length = MAX_SEQ_TOKENS
-    log.info("loaded %s@%s in %.1fs", EMBED_SERVER_MODEL,
-             EMBED_SERVER_MODEL_REVISION[:12], time.time() - t)
+    log.info("loaded %s@%s on %s in %.1fs", EMBED_SERVER_MODEL,
+             EMBED_SERVER_MODEL_REVISION[:12], EMBED_SERVER_DEVICE, time.time() - t)
 
 
 def encode(texts: list[str], input_type: str | None, dim: int) -> list[list[float]]:
@@ -74,6 +83,67 @@ def encode(texts: list[str], input_type: str | None, dim: int) -> list[list[floa
         vecs = fn(texts, batch_size=BATCH_SIZE, truncate_dim=dim, normalize_embeddings=True,
                   convert_to_numpy=True, show_progress_bar=False)
     return vecs.tolist()  # pyright: ignore[reportAttributeAccessIssue]  # ndarray when convert_to_numpy=True
+
+
+class Upstream:
+    """Forward document batches to another embed-server; local fallback + cooldown."""
+
+    def __init__(self, url: str, timeout: float, cooldown: float):
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.cooldown = cooldown
+        self.skip_until = 0.0
+        self.last_error = ""
+        self._lock = threading.Lock()
+
+    def wanted(self, input_type: str | None) -> bool:
+        return bool(self.url) and input_type != "query" and time.time() >= self.skip_until
+
+    def embed(self, inputs: list[str], input_type: str | None, dim: int) -> list[list[float]]:
+        """Return vectors from upstream, or raise (caller falls back to local)."""
+        body = json.dumps({"model": MODEL_ID, "input": inputs, "input_type": input_type,
+                           "output_dimension": dim}).encode("utf-8")
+        req = urllib.request.Request(f"{self.url}/embeddings", data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            payload = json.loads(resp.read())
+        if payload.get("model") != MODEL_ID:
+            raise ValueError(f"upstream served model {payload.get('model')!r}, expected {MODEL_ID!r}")
+        data = sorted(payload.get("data") or [], key=lambda d: d.get("index", 0))
+        vectors = [d.get("embedding") for d in data]
+        if len(vectors) != len(inputs) or any(not isinstance(v, list) or len(v) != dim
+                                              for v in vectors):
+            raise ValueError(f"upstream returned {len(vectors)} vectors for {len(inputs)} "
+                             f"inputs or wrong dimensions (want {dim})")
+        return vectors
+
+    def failed(self, err: Exception):
+        with self._lock:
+            self.skip_until = time.time() + self.cooldown
+            self.last_error = f"{type(err).__name__}: {err}"
+
+    def status(self) -> dict:
+        if not self.url:
+            return {"configured": False}
+        return {"configured": True, "url": self.url,
+                "available": time.time() >= self.skip_until, "last_error": self.last_error}
+
+
+UPSTREAM = Upstream(EMBED_UPSTREAM_URL, EMBED_UPSTREAM_TIMEOUT, EMBED_UPSTREAM_COOLDOWN)
+
+
+def embed_with_failover(inputs: list[str], input_type: str | None, dim: int,
+                        upstream: Upstream | None = None) -> tuple[list[list[float]], str]:
+    """Embed via upstream when appropriate, else locally. Returns (vectors, where)."""
+    upstream = upstream or UPSTREAM
+    if upstream.wanted(input_type):
+        try:
+            return upstream.embed(inputs, input_type, dim), "upstream"
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+            upstream.failed(e)
+            log.warning("upstream %s failed (%s); embedding locally, retrying upstream in %.0fs",
+                        upstream.url, upstream.last_error, upstream.cooldown)
+    return encode(inputs, input_type, dim), "local"
 
 
 class BadRequest(Exception):
@@ -120,7 +190,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") == "/health":
-            self._send(200, {"status": "ok", "model": MODEL_ID})
+            self._send(200, {"status": "ok", "model": MODEL_ID, "device": EMBED_SERVER_DEVICE,
+                             "upstream": UPSTREAM.status()})
         elif self.path.rstrip("/") == "/v1/models":
             self._send(200, {"object": "list", "data": [
                 {"id": MODEL_ID, "object": "model", "owned_by": "voyageai"}]})
@@ -146,13 +217,13 @@ class Handler(BaseHTTPRequestHandler):
 
         t = time.time()
         try:
-            vectors = encode(inputs, input_type, dim)
+            vectors, where = embed_with_failover(inputs, input_type, dim)
         except Exception as e:
             log.exception("encode failed")
             self._send(500, {"error": {"message": f"{type(e).__name__}: {e}"}})
             return
-        log.info("embedded %d input(s) type=%s dim=%d in %.2fs",
-                 len(inputs), input_type, dim, time.time() - t)
+        log.info("embedded %d input(s) type=%s dim=%d %s in %.2fs",
+                 len(inputs), input_type, dim, where, time.time() - t)
         # Token usage is approximate (4 chars ≈ 1 token), matching vault_embed's estimate.
         tokens = sum(max(1, len(s) // 4) for s in inputs)
         self._send(200, {

@@ -91,6 +91,15 @@ EMBED_SERVER_MODEL = os.environ.get("MEMENTO_EMBED_SERVER_MODEL", "voyageai/voya
 # Pinned HF revision: the model ships trust_remote_code modeling code, so never float it.
 EMBED_SERVER_MODEL_REVISION = os.environ.get("MEMENTO_EMBED_SERVER_MODEL_REVISION",
     "67fabc9bef010dabc5f6024aa1b1b6b93410426f")
+# "cpu" here; "cuda" for the GPU copy of the same server on the DGX.
+EMBED_SERVER_DEVICE = os.environ.get("MEMENTO_EMBED_SERVER_DEVICE", "cpu")
+# Optional upstream embed-server (same model + revision, e.g. the DGX GPU copy). When set,
+# document/untyped batches are forwarded there and embedded locally only if it fails;
+# queries are always embedded locally (fast, no network dependency). Empty = local only.
+EMBED_UPSTREAM_URL = os.environ.get("MEMENTO_EMBED_UPSTREAM_URL", "")
+EMBED_UPSTREAM_TIMEOUT = float(os.environ.get("MEMENTO_EMBED_UPSTREAM_TIMEOUT", "30"))
+# After an upstream failure, skip it for this many seconds before trying again.
+EMBED_UPSTREAM_COOLDOWN = float(os.environ.get("MEMENTO_EMBED_UPSTREAM_COOLDOWN", "60"))
 
 # Embedding model endpoint (OpenAI-compatible /v1/embeddings). Defaults to the local
 # embed-server. To go back to the DGX: http://dgx-spark:1234/v1,
