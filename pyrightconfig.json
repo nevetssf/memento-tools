@@ -1,5 +1,5 @@
 {
   "venvPath": ".",
   "venv": ".venv",
-  "exclude": [".venv", ".venv-embed", "**/__pycache__", "faces-review"]
+  "exclude": [".venv", ".venv-embed", "**/__pycache__"]
 }

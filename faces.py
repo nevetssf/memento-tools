@@ -21,9 +21,12 @@ from pathlib import Path
 
 import numpy as np
 
-DB_PATH = Path.home() / "memento-tools" / "faces.db"
-PHOTO_DIRS = sorted(Path.home().glob("obsidian-vault/Journal/*/photos"))
-REVIEW_DIR = Path.home() / "memento-tools" / "faces-review"
+sys.path.insert(0, str(Path(__file__).parent))
+from config import FACES_DB_PATH, FACES_REVIEW_DIR, JOURNAL_DIR
+
+DB_PATH = FACES_DB_PATH
+PHOTO_DIRS = sorted(JOURNAL_DIR.glob("*/photos"))
+REVIEW_DIR = FACES_REVIEW_DIR
 MATCH_THRESHOLD = 0.45  # cosine similarity; conservative to avoid false tags
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 

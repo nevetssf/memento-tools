@@ -11,7 +11,8 @@ file from the last-known byte offset, extracts user (Steven) and assistant
 (Memento) text turns, and appends them to the chat-signal-db Markdown
 transcript via chat_signal.save_message.
 
-State (per-file byte offset) lives at ~/memento-tools/.chat_reconcile_state.json
+State (per-file byte offset) lives at config.CHAT_RECONCILE_STATE_FILE
+(~/memento-data/chat_reconcile_state.json)
 so successive runs only process new lines.
 
 Why an offset-based reconciler instead of an OpenClaw hook?
@@ -36,10 +37,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import chat_signal as cs
 import localtime
-from config import LOCATION_FILE
+from config import LOCATION_FILE, CHAT_RECONCILE_STATE_FILE
 
 SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
-STATE_FILE = SCRIPTS_DIR / ".chat_reconcile_state.json"
+STATE_FILE = CHAT_RECONCILE_STATE_FILE
 
 # Inbound user messages from a channel are wrapped with one or more
 # "<Heading> (untrusted metadata):\n```json\n{...}\n```" blocks before the
