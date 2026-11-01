@@ -49,6 +49,13 @@ LOCATION_FILE = Path(os.environ.get("MEMENTO_LOCATION_FILE",
     str(Path.home() / ".openclaw/workspace/LOCATION.md")))
 SOUL_FILE = Path(os.environ.get("MEMENTO_SOUL_FILE",
     str(Path.home() / ".openclaw/workspace/SOUL.md")))
+# OpenClaw's session index — chat_reconcile.py reads it to find agent transcripts
+OPENCLAW_SESSIONS_JSON = Path(os.environ.get("MEMENTO_OPENCLAW_SESSIONS_JSON",
+    str(Path.home() / ".openclaw/agents/main/sessions/sessions.json")))
+
+# Separate venv holding journal-pdf.py's heavy deps (weasyprint, markdown, ...)
+JOURNAL_PDF_VENV = Path(os.environ.get("MEMENTO_JOURNAL_PDF_VENV",
+    str(Path.home() / ".local/share/journal-pdf-venv")))
 
 # Obsidian templates directory
 TEMPLATES_DIR = Path(os.environ.get("MEMENTO_TEMPLATES_DIR", str(VAULT_DIR / "Templates")))

@@ -30,10 +30,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import JOURNAL_DIR
+from config import JOURNAL_DIR, JOURNAL_PDF_VENV
 
 # Ensure we can import from the venv
-VENV_SITE = Path.home() / ".local/share/journal-pdf-venv/lib"
+VENV_SITE = JOURNAL_PDF_VENV / "lib"
 venv_dirs = sorted(VENV_SITE.glob("python*/site-packages"))
 if venv_dirs:
     sys.path.insert(0, str(venv_dirs[-1]))
