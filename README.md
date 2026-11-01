@@ -100,7 +100,9 @@ defaults for Steven's setup. Override what you need:
 |---|---|---|
 | `MEMENTO_VAULT_DIR` | `~/obsidian-vault` | Root of your Obsidian vault |
 | `MEMENTO_JOURNAL_DIR` | `$VAULT/Journal` | Journal subdirectory |
-| `MEMENTO_DB_PATH` | `$VAULT/people.db` | People SQLite database |
+| `MEMENTO_DATA_DIR` | `~/memento-data` | Directory for the SQLite DBs (kept out of the vault so Obsidian Sync never copies them) |
+| `MEMENTO_DB_PATH` | `$DATA_DIR/people.db` | People SQLite database |
+| `MEMENTO_CELLAR_DB_PATH` | `$DATA_DIR/cellar.db` | Cellar SQLite database |
 | `MEMENTO_PEOPLE_DIR` | `$VAULT/People` | Folder for per-person Obsidian notes |
 | `MEMENTO_CELLAR_DIR` | `$VAULT/Cellar` | Wine/spirits notes |
 | `MEMENTO_TEMPLATES_DIR` | `$VAULT/Templates` | Note templates (cellar uses these) |
