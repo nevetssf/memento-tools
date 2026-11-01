@@ -242,6 +242,17 @@ def convert_pdf(pdf_path: Path, *, force: bool = False,
     current_hash = file_hash(pdf_path)
     prev_hash = stored_hash(md_path)
 
+    # A same-name .md that pdf2md didn't write (no source_pdf_hash) is a real note —
+    # e.g. a journal entry next to its journal-pdf export, or a notebook index note.
+    # Never overwrite it, not even with --force.
+    if md_path.exists() and prev_hash is None:
+        return {
+            "status": "conflict",
+            "path": str(pdf_path),
+            "md_path": str(md_path),
+            "warning": "a note with the sidecar's name exists and wasn't written by pdf2md; skipped.",
+        }
+
     # Skip if already up-to-date
     if prev_hash == current_hash and not force:
         return {"status": "unchanged", "path": str(pdf_path)}
@@ -316,7 +327,9 @@ def main():
         pdfs = [Path(p).resolve() for p in args.paths
                 if Path(p).suffix.lower() == ".pdf" and Path(p).exists()]
     else:
-        pdfs = sorted(VAULT_DIR.rglob("*.pdf"))
+        # Case-insensitive: older files often have an uppercase .PDF extension
+        pdfs = sorted(p for p in VAULT_DIR.rglob("*")
+                      if p.suffix.lower() == ".pdf" and p.is_file())
         # Skip standard non-content directories
         pdfs = [p for p in pdfs
                 if not any(s in p.parts for s in (".obsidian", ".trash", "Templates"))]
@@ -341,7 +354,9 @@ def main():
                 md = pdf.with_suffix(".md")
                 ph = stored_hash(md)
                 ch = file_hash(pdf)
-                if ph == ch:
+                if md.exists() and ph is None:
+                    r = {"status": "conflict", "path": str(pdf), "md_path": str(md)}
+                elif ph == ch:
                     r = {"status": "unchanged", "path": str(pdf)}
                 elif ph is None:
                     r = {"status": "would-convert", "path": str(pdf)}
@@ -354,7 +369,7 @@ def main():
             summary[r["status"]] = summary.get(r["status"], 0) + 1
             if not sys.stdout.isatty():
                 print(json.dumps(r))
-            elif r["status"] in ("stale", "error"):
+            elif r["status"] in ("stale", "conflict", "error"):
                 print(f"\n  {r['status']}: {pdf}: {r.get('warning') or r.get('error')}")
         except Exception as e:
             summary["error"] = summary.get("error", 0) + 1

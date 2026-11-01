@@ -27,6 +27,7 @@ import sqlite_vec
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     VAULT_DIR, EMBED_DB_PATH, EMBED_MODEL_URL, EMBED_MODEL_NAME, EMBED_DIMS,
+    EMBED_REQUEST_BATCH,
     CHAT_MODEL_URL, CHAT_MODEL_NAME, CHAT_MODEL_API_KEY,
 )
 from journal_fm import split_frontmatter
@@ -224,13 +225,21 @@ def embed(text: str, input_type: str = "query") -> list[float]:
 
 
 def embed_batch(texts: list[str], input_type: str = "document") -> list[list[float]]:
-    """Embed multiple texts (documents by default) in one request."""
-    data = _post_json(
-        f"{EMBED_MODEL_URL}/embeddings",
-        {"model": EMBED_MODEL_NAME, "input": texts, "input_type": input_type},
-        timeout=300,
-    )
-    return [item["embedding"] for item in data["data"]]
+    """Embed multiple texts (documents by default), EMBED_REQUEST_BATCH per request.
+
+    Sub-batching keeps a large file (e.g. a 200-chunk PDF) from holding the embed
+    server's inference lock for minutes and starving interactive queries.
+    """
+    vectors: list[list[float]] = []
+    step = max(1, EMBED_REQUEST_BATCH)
+    for i in range(0, len(texts), step):
+        data = _post_json(
+            f"{EMBED_MODEL_URL}/embeddings",
+            {"model": EMBED_MODEL_NAME, "input": texts[i:i + step], "input_type": input_type},
+            timeout=300,
+        )
+        vectors.extend(item["embedding"] for item in data["data"])
+    return vectors
 
 
 class ChatUnreachable(RuntimeError):

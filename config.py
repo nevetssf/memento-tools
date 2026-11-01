@@ -99,6 +99,10 @@ EMBED_MODEL_URL = os.environ.get("MEMENTO_EMBED_MODEL_URL",
     f"http://{EMBED_SERVER_HOST}:{EMBED_SERVER_PORT}/v1")
 EMBED_MODEL_NAME = os.environ.get("MEMENTO_EMBED_MODEL_NAME", "voyage-4-nano")
 EMBED_DIMS = int(os.environ.get("MEMENTO_EMBED_DIMS", "1024"))
+# Max texts per /embeddings request. The CPU embed-server serializes inference, so a
+# big request blocks every other client (OpenClaw memory search times out at 120 s);
+# small requests let queries interleave and keep each one well under the timeout.
+EMBED_REQUEST_BATCH = int(os.environ.get("MEMENTO_EMBED_REQUEST_BATCH", "8"))
 
 # Chat model endpoint for chunking / metadata extraction / reranking
 CHAT_MODEL_URL = os.environ.get("MEMENTO_CHAT_MODEL_URL", "http://dgx-spark:1234/v1")

@@ -117,6 +117,7 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_EMBED_MODEL_URL` | `http://127.0.0.1:8790/v1` | Embedding endpoint (local `embed-server.py`; any OpenAI/Voyage-compatible `/embeddings`) |
 | `MEMENTO_EMBED_MODEL_NAME` | `voyage-4-nano` | Embedding model |
 | `MEMENTO_EMBED_DIMS` | `1024` | Vector dimensions |
+| `MEMENTO_EMBED_REQUEST_BATCH` | `8` | Max texts per embeddings request — keeps big files from starving interactive queries on the CPU embed server |
 | `MEMENTO_EMBED_SERVER_HOST` / `_PORT` | `127.0.0.1` / `8790` | Where `embed-server.py` listens |
 | `MEMENTO_EMBED_SERVER_MODEL` / `_MODEL_REVISION` | `voyageai/voyage-4-nano` / pinned commit | Model the server loads (revision pinned: it runs remote code) |
 | `MEMENTO_CHAT_MODEL_URL` | `http://dgx-spark:1234/v1` | Chat LLM endpoint |
