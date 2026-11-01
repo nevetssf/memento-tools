@@ -1,7 +1,7 @@
 """cellar.py — SQLite-backed cellar database.
 
 Mirrors the people-db pattern: structured data is canonical in SQLite at
-~/obsidian-vault/cellar.db, long-form prose lives in linked Obsidian
+~/memento-data/cellar.db (config.CELLAR_DB_PATH), long-form prose lives in linked Obsidian
 notes whose paths are stored on the row's `obsidian_file` field.
 
 Three tables: producers, bottles, tastings. Each row optionally points
@@ -26,13 +26,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import VAULT_DIR
+from config import VAULT_DIR, CELLAR_DB_PATH
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-DB_PATH = Path(VAULT_DIR) / "cellar.db"
+DB_PATH = CELLAR_DB_PATH
 CELLAR_ROOT = Path(VAULT_DIR) / "Cellar"
 
 # Recommended type vocabulary. The DB doesn't restrict via CHECK so new
