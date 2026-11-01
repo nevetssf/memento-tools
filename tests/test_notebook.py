@@ -96,6 +96,23 @@ def partial_facing(keep="left"):
     return img
 
 
+PALE_SPREAD_QUADS = ([[420, 380], [1000, 430], [1000, 1250], [400, 1290]],
+                     [[1000, 430], [1580, 380], [1600, 1290], [1000, 1250]])
+
+
+def spread_on_pale_table():
+    """A spread on a pale grey table that runs off the frame, on a dark
+    floor: Otsu splits floor from table+paper, so the table merges with the
+    pages unless the threshold is raised."""
+    img = _table()
+    table = np.array([[0, 0], [1850, 0], [1750, 1450], [0, 1550]], np.int32)
+    cv2.fillPoly(img, [table], (160, 160, 160))
+    left, right = PALE_SPREAD_QUADS
+    _paint_page(img, left, 215, True, seed=2)
+    _paint_page(img, right, 240, None, seed=3)
+    return img
+
+
 def wood_table(h=1600, w=1200, seed=0):
     rng = np.random.default_rng(seed)
     xs = np.arange(w)[None, :]
@@ -193,6 +210,15 @@ class TestLayout(unittest.TestCase):
 
     def test_no_paper(self):
         self.assertEqual(ni.classify_layout(_table(), PAGE_ASPECT).kind, "none")
+
+    def test_spread_on_pale_table_off_frame(self):
+        img = spread_on_pale_table()
+        lay = ni.classify_layout(img, PAGE_ASPECT)
+        self.assertEqual((lay.kind, lay.rotate, lay.halves), ("spread", 0, ["left", "right"]))
+        for half, truth in zip(("left", "right"), PALE_SPREAD_QUADS):
+            res = ni.detect_page_quad(img, half=half, page_aspect=PAGE_ASPECT)
+            assert res is not None
+            self.assertLess(corner_error(res[0], truth), 0.05, half)
 
 
 class TestCoverDetection(unittest.TestCase):
@@ -292,6 +318,21 @@ class TestProcess(unittest.TestCase):
         self.assertEqual(info["dewarp"], "applied")
         top, _ = ni.top_bottom_profiles(out_mask)
         self.assertLess(np.ptp(top[50:-50]), 6)
+
+    def test_dewarp_ignores_a_bite_out_of_one_edge(self):
+        # flat page whose bottom edge lost a chunk to a shadowed corner:
+        # that is not curl, and correcting it would drag writing off the page
+        h, w = 1650, 1050
+        mask = np.zeros((h, w), np.uint8)
+        mask[10:h - 5] = 255
+        mask[h - 130:, 650:900] = 0
+        page = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        out, _, info = ni.dewarp_curl(page, mask)
+        self.assertEqual(info.get("edge_ignored"), "bottom")
+        self.assertNotEqual(info["dewarp"], "applied")
+        np.testing.assert_array_equal(out, page)
+        flags = ni.quality_flags(np.full((h, w), 255, np.uint8), mask, info, None)
+        self.assertTrue(any("bitten" in f for f in flags))
 
 
 # ---------------------------------------------------------------------------
