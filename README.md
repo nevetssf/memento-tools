@@ -108,7 +108,6 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_LOCALTIME_ALIASES_FILE` | `$DATA_DIR/localtime-aliases.json` | Learned place-name aliases for `localtime.py` |
 | `MEMENTO_CHAT_RECONCILE_STATE_FILE` | `$DATA_DIR/chat_reconcile_state.json` | Per-transcript read offsets for `chat_reconcile.py` |
 | `MEMENTO_OPENCLAW_SESSIONS_JSON` | `~/.openclaw/agents/main/sessions/sessions.json` | OpenClaw session index read by `chat_reconcile.py` |
-| `MEMENTO_JOURNAL_PDF_VENV` | `~/.local/share/journal-pdf-venv` | Separate venv with `journal-pdf.py`'s deps |
 | `MEMENTO_PEOPLE_DIR` | `$VAULT/People` | Folder for per-person Obsidian notes |
 | `MEMENTO_CELLAR_DIR` | `$VAULT/Cellar` | Wine/spirits notes |
 | `MEMENTO_TEMPLATES_DIR` | `$VAULT/Templates` | Note templates (cellar uses these) |
