@@ -107,23 +107,71 @@ def _dst_rect(out_w: int, out_h: int) -> np.ndarray:
 # Segmentation
 # ---------------------------------------------------------------------------
 
+def _threshold_mask(val, sat, t):
+    mask = ((val > t) & (sat < 90)).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    # strong open: disconnect the page from bright background it touches
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+
+
+def _border_contact(blob):
+    """Share of the frame's border pixels covered by the blob."""
+    return float(np.r_[blob[0], blob[-1], blob[:, 0], blob[:, -1]].astype(bool).mean())
+
+
 def paper_mask(img):
     """Binary mask of bright/unsaturated paper at reduced scale.
     Returns (mask, scale). Aggressive opening breaks thin bridges to
-    bright background (tables, cloth)."""
+    bright background (tables, cloth).
+
+    A pale grey table can be as bright as the paper, so Otsu (which splits
+    a dark floor from everything else) merges the two into one blob that
+    runs off the frame. When the paper blob touches the frame border, the
+    threshold is raised step by step. If at some level the border contact
+    all but vanishes AND the remaining blob's area then holds steady over
+    the next steps, the background fell away and left the paper, and that
+    level is used. A page that genuinely fills the frame keeps its border
+    contact until it is being eroded by the threshold itself, which shows
+    as a still-shrinking area, so it keeps the Otsu mask."""
     h, w = img.shape[:2]
     scale = float(MASK_SCALE_PX) / max(h, w)
     small = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     sat, val = hsv[:, :, 1], hsv[:, :, 2]
-    t, bright = cv2.threshold(val, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    t, _ = cv2.threshold(val, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     if t < 90:
         # Otsu split a uniformly dark scene (no paper) at its own noise
         return np.zeros_like(val), scale
-    mask = cv2.bitwise_and(bright, (sat < 90).astype(np.uint8) * 255)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    # strong open: disconnect the page from bright background it touches
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+    mask = _threshold_mask(val, sat, t)
+    blobs = page_blobs(mask)
+    if not blobs:
+        return mask, scale
+    contact = _border_contact(blobs[0])
+    if contact < 0.08:
+        return mask, scale
+    steps = []                                  # (mask, area, contact) per level
+    for t2 in np.arange(t + 4, 231, 4):
+        m2 = _threshold_mask(val, sat, t2)
+        b2 = page_blobs(m2)
+        if not b2:
+            break
+        steps.append((m2, np.count_nonzero(b2[0]), _border_contact(b2[0])))
+
+    def steady(i, span=2, keep=0.95):
+        # the paper is uniformly bright above the cut: its area barely moves
+        return i + span < len(steps) and steps[i + span][1] >= keep * steps[i][1]
+
+    for i, (m2, a2, c2) in enumerate(steps):
+        if c2 > min(0.02, 0.25 * contact) or not steady(i):
+            continue
+        # detached; a step or two more may shed a last sliver of background
+        # still touching the frame, as long as the page itself stays intact
+        for m3, a3, c3 in steps[i + 1:i + 4]:
+            if a3 < 0.97 * a2:
+                break
+            if c3 == 0:
+                return m3, scale
+        return m2, scale
     return mask, scale
 
 
@@ -722,11 +770,26 @@ def dewarp_curl(page, page_mask, min_dev_frac=0.003, max_dev_frac=0.06, min_vali
         chord = curve[0] + (curve[-1] - curve[0]) * all_x / (w - 1)
         devs.append(curve - chord)
     dev_t, dev_b = devs
-    peak = float(max(np.abs(dev_t).max(), np.abs(dev_b).max()))
-    if peak < min_dev_frac * h:
-        return page, page_mask, {"dewarp": "not needed", "curl_px": round(peak, 1)}
+    p_t, p_b = float(np.abs(dev_t).max()), float(np.abs(dev_b).max())
+    peak = max(p_t, p_b)
     if peak > max_dev_frac * h:
         return page, page_mask, {"dewarp": f"skipped: implausible curl {peak:.0f}px"}
+    # Real curl bends both edges by similar amounts; one edge bowing far
+    # more than the other is a bite out of the mask (a shadowed corner, a
+    # finger, a clip), and "correcting" it drags content off the page.
+    # Ignore that edge and correct from the other one.
+    ignored = None
+    lo, hi = min(p_t, p_b), max(p_t, p_b)
+    if hi > 3 * lo and hi - lo > 0.02 * h:
+        ignored = "top" if p_t > p_b else "bottom"
+        if ignored == "top":
+            dev_t = np.zeros_like(dev_t)
+        else:
+            dev_b = np.zeros_like(dev_b)
+        peak = lo
+    extra = {"edge_ignored": ignored} if ignored else {}
+    if peak < min_dev_frac * h:
+        return page, page_mask, {"dewarp": "not needed", "curl_px": round(peak, 1), **extra}
     yy = np.arange(h, dtype=np.float32)[:, None] / (h - 1)
     map_y = (np.arange(h, dtype=np.float32)[:, None]
              + (dev_t[None, :] * (1 - yy) + dev_b[None, :] * yy)).astype(np.float32)
@@ -734,7 +797,7 @@ def dewarp_curl(page, page_mask, min_dev_frac=0.003, max_dev_frac=0.06, min_vali
     out = cv2.remap(page, map_x, map_y, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     out_mask = cv2.remap(page_mask, map_x, map_y, cv2.INTER_NEAREST,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    return out, out_mask, {"dewarp": "applied", "curl_px": round(peak, 1)}
+    return out, out_mask, {"dewarp": "applied", "curl_px": round(peak, 1), **extra}
 
 
 # ---------------------------------------------------------------------------
@@ -950,6 +1013,9 @@ def quality_flags(gray, pmask, info, side):
                 flags.append(f"writing reaches the {edge} edge; content may be clipped")
     if str(info.get("dewarp", "")).startswith("skipped: implausible"):
         flags.append("page curl looked implausible and was not corrected")
+    if info.get("edge_ignored"):
+        flags.append(f"the {info['edge_ignored']} page edge looked bitten into (shadow or "
+                     "object); curl was corrected from the other edge only")
     return flags
 
 
