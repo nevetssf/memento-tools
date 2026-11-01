@@ -198,6 +198,20 @@ class TestEmbedRequests(unittest.TestCase):
         self.assertEqual(sent[1]["input_type"], "document")
         self.assertEqual(sent[0]["model"], ve.EMBED_MODEL_NAME)
 
+    def test_embed_batch_splits_into_request_sized_chunks(self):
+        sent = []
+
+        def fake_post(url, body, timeout=120, api_key=""):
+            sent.append(body["input"])
+            return {"data": [{"embedding": [float(len(t))]} for t in body["input"]]}
+
+        texts = [f"doc {i}" * (i + 1) for i in range(19)]
+        with mock.patch.object(ve, "EMBED_REQUEST_BATCH", 8), \
+                mock.patch.object(ve, "_post_json", side_effect=fake_post):
+            vecs = ve.embed_batch(texts)
+        self.assertEqual([len(b) for b in sent], [8, 8, 3])
+        self.assertEqual(vecs, [[float(len(t))] for t in texts])  # order preserved
+
 
 if __name__ == "__main__":
     unittest.main()
