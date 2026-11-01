@@ -37,9 +37,9 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import chat_signal as cs
 import localtime
-from config import LOCATION_FILE, CHAT_RECONCILE_STATE_FILE
+from config import LOCATION_FILE, CHAT_RECONCILE_STATE_FILE, OPENCLAW_SESSIONS_JSON
 
-SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
+SESSIONS_JSON = OPENCLAW_SESSIONS_JSON
 STATE_FILE = CHAT_RECONCILE_STATE_FILE
 
 # Inbound user messages from a channel are wrapped with one or more
