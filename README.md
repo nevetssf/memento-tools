@@ -118,6 +118,9 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_EMBED_MODEL_NAME` | `voyage-4-nano` | Embedding model |
 | `MEMENTO_EMBED_DIMS` | `1024` | Vector dimensions |
 | `MEMENTO_EMBED_REQUEST_BATCH` | `8` | Max texts per embeddings request — keeps big files from starving interactive queries on the CPU embed server |
+| `MEMENTO_EMBED_SERVER_DEVICE` | `cpu` | Torch device for `embed-server.py` (`cuda` on the DGX copy) |
+| `MEMENTO_EMBED_UPSTREAM_URL` | *(empty)* | Upstream embed-server for document batches, with local fallback; empty = local only |
+| `MEMENTO_EMBED_UPSTREAM_TIMEOUT` / `_COOLDOWN` | `30` / `60` | Seconds per upstream request / to skip the upstream after a failure |
 | `MEMENTO_EMBED_SERVER_HOST` / `_PORT` | `127.0.0.1` / `8790` | Where `embed-server.py` listens |
 | `MEMENTO_EMBED_SERVER_MODEL` / `_MODEL_REVISION` | `voyageai/voyage-4-nano` / pinned commit | Model the server loads (revision pinned: it runs remote code) |
 | `MEMENTO_CHAT_MODEL_URL` | `http://dgx-spark:1234/v1` | Chat LLM endpoint |
@@ -185,6 +188,18 @@ docstring and `requirements-embed.txt` (keep `transformers<5`). On Steven's host
 as the `embed-server.service` systemd user unit with `Nice=19`, `CPUQuota=150%` and
 `MemoryMax=5G` so embedding never starves the agent. OpenClaw's memory search uses it
 via `memorySearch.provider: "voyage"` with `remote.baseUrl: http://127.0.0.1:8790/v1`.
+
+**GPU upstream with CPU failover.** The same server also runs on the DGX's GPU (the
+`embed-server` container, `MEMENTO_EMBED_SERVER_DEVICE=cuda`, same model and pinned
+revision — vectors match the CPU copy to cos = 1.000000). With
+`MEMENTO_EMBED_UPSTREAM_URL=http://dgx-spark:8790/v1` set on the local unit, document and
+untyped batches are forwarded to the DGX (~27× faster); if it errors, times out
+(`MEMENTO_EMBED_UPSTREAM_TIMEOUT`, 30 s) or returns a malformed response, the batch is
+embedded locally and the DGX is skipped for `MEMENTO_EMBED_UPSTREAM_COOLDOWN` (60 s).
+Queries are always embedded locally. Clients only ever talk to `127.0.0.1:8790`, so
+failover is invisible to them; `GET /health` shows the upstream's state. The DGX copy
+of `embed-server.py` + `config.py` lives in `dgx-spark:~/embed-server/` — rebuild its
+image after changing either file (`~/bin/embed-server-launch.sh` there).
 
 What you get:
 - Vector search via `sqlite-vec` (1024-dim voyage-4-nano vectors by default)
