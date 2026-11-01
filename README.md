@@ -103,6 +103,10 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_DATA_DIR` | `~/memento-data` | Directory for the SQLite DBs (kept out of the vault so Obsidian Sync never copies them) |
 | `MEMENTO_DB_PATH` | `$DATA_DIR/people.db` | People SQLite database |
 | `MEMENTO_CELLAR_DB_PATH` | `$DATA_DIR/cellar.db` | Cellar SQLite database |
+| `MEMENTO_FACES_DB_PATH` | `$DATA_DIR/faces.db` | Face-recognition database |
+| `MEMENTO_FACES_REVIEW_DIR` | `$DATA_DIR/faces-review` | Face cluster contact sheets |
+| `MEMENTO_LOCALTIME_ALIASES_FILE` | `$DATA_DIR/localtime-aliases.json` | Learned place-name aliases for `localtime.py` |
+| `MEMENTO_CHAT_RECONCILE_STATE_FILE` | `$DATA_DIR/chat_reconcile_state.json` | Per-transcript read offsets for `chat_reconcile.py` |
 | `MEMENTO_PEOPLE_DIR` | `$VAULT/People` | Folder for per-person Obsidian notes |
 | `MEMENTO_CELLAR_DIR` | `$VAULT/Cellar` | Wine/spirits notes |
 | `MEMENTO_TEMPLATES_DIR` | `$VAULT/Templates` | Note templates (cellar uses these) |
@@ -415,13 +419,13 @@ Local face recognition over the journal photo archive. Added 2026-10-02.
 - **Models:** InsightFace `buffalo_l` (RetinaFace detection + ArcFace embeddings),
   CPU-only via onnxruntime. Model files auto-download to `~/.insightface/models/`
   on first run. Everything runs and stays local — no cloud APIs.
-- **Storage:** `faces.db` (SQLite) — `people` (name + people-db id), `faces`
+- **Storage:** `~/memento-data/faces.db` (SQLite) — `people` (name + people-db id), `faces`
   (embedding BLOB, bbox, source photo, person/cluster assignment, ignored flag),
   `scanned` (processed-photo ledger, makes re-scans incremental).
 - **Design:** match-only. Unknown faces are never named, stored against a person,
   or auto-enrolled. Match threshold is 0.45 cosine similarity (conservative — a
   false "that's <name>" in the journal is worse than a miss). Enrollment is
-  manual: cluster unlabeled faces, render contact sheets to `faces-review/`,
+  manual: cluster unlabeled faces, render contact sheets to `~/memento-data/faces-review/`,
   Steven confirms who's who.
 
 ```

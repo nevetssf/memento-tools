@@ -31,6 +31,16 @@ DB_PATH = Path(os.environ.get("MEMENTO_DB_PATH", str(DATA_DIR / "people.db")))
 # Cellar SQLite database (default: $DATA_DIR/cellar.db)
 CELLAR_DB_PATH = Path(os.environ.get("MEMENTO_CELLAR_DB_PATH", str(DATA_DIR / "cellar.db")))
 
+# Face recognition DB + contact sheets (biometric data — never in the vault or git)
+FACES_DB_PATH = Path(os.environ.get("MEMENTO_FACES_DB_PATH", str(DATA_DIR / "faces.db")))
+FACES_REVIEW_DIR = Path(os.environ.get("MEMENTO_FACES_REVIEW_DIR", str(DATA_DIR / "faces-review")))
+
+# Small runtime state files
+LOCALTIME_ALIASES_FILE = Path(os.environ.get("MEMENTO_LOCALTIME_ALIASES_FILE",
+    str(DATA_DIR / "localtime-aliases.json")))
+CHAT_RECONCILE_STATE_FILE = Path(os.environ.get("MEMENTO_CHAT_RECONCILE_STATE_FILE",
+    str(DATA_DIR / "chat_reconcile_state.json")))
+
 # People notes directory in Obsidian
 PEOPLE_DIR = Path(os.environ.get("MEMENTO_PEOPLE_DIR", str(VAULT_DIR / "People")))
 

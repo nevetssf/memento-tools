@@ -43,9 +43,9 @@ from zoneinfo import ZoneInfo
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent))
-from config import LOCATION_FILE as _LOCATION_FILE
+from config import LOCATION_FILE as _LOCATION_FILE, LOCALTIME_ALIASES_FILE
 
-ALIASES_FILE = Path(__file__).parent.parent / "localtime-aliases.json"
+ALIASES_FILE = LOCALTIME_ALIASES_FILE
 
 # ---------------------------------------------------------------------------
 # Location → IANA timezone table
