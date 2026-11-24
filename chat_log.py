@@ -1,12 +1,23 @@
-"""Chat-Signal database: persistent record of Signal exchanges with the agent.
+"""Chat log: persistent record of Steven's conversation with the agent, all channels.
 
-Stores chats as Markdown under VAULT_DIR/Chats/Signal/YYYY/MM/YYYY-MM-DD.md,
-with photos under VAULT_DIR/Chats/Signal/YYYY/MM/photos/.
+Stores chats as Markdown under CHAT_DIR (VAULT_DIR/Chats)/YYYY/MM/YYYY-MM-DD.md, with
+attachments under CHAT_DIR/YYYY/MM/photos/ (audio/, video/, attachments/). Group chats
+go under CHAT_DIR/Groups/<group>/YYYY/MM/.
+
+Steven talks to Memento in one shared session over several channels (Signal, voice
+devices, the Control UI), so one day file holds all of them. Each exchange is one
+`##` section whose heading names its channel, and for voice the device and trigger:
+
+    ## 14:02 MST · voice · boulder-office-voice (wake word)
+    **Steven:** What's on my calendar?
+    **Memento:** Just the 3 pm call.
+
+The frontmatter lists the day's `channels` and `devices`.
 
 Distinct from the daily journal: journal entries are Steven's logged life events;
 chats are the full transcript of his exchanges with the agent (Memento).
 
-Public API used by chat-signal-mcp.py:
+Public API used by chat-log-mcp.py:
   save_message(sender, text, ...)
   save_exchange(steven_text, memento_text, ...)
   save_photo(source_path, ...)
@@ -31,18 +42,25 @@ from datetime import date as _date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from config import VAULT_DIR, LOCATION_FILE
+from config import VAULT_DIR, LOCATION_FILE, CHAT_DIR
 import localtime
 
 # ---------- Constants -----------------------------------------------------
 
-CHAT_ROOT = Path(VAULT_DIR) / "Chats" / "Signal"
+CHAT_ROOT = Path(CHAT_DIR)
 DEFAULT_AGENT = "main"
+DEFAULT_CHANNEL = "signal"
 VALID_SENDERS = {"Steven", "Memento", "system"}
+# A Memento/system message joins the open section (the exchange it answers) when the
+# section has the same channel label and started at most this many minutes earlier.
+REPLY_WINDOW_MIN = 30
 
 # Speaker label, optionally with `(agent)` suffix. Captures: name, agent, rest.
 _SPEAKER_RE = re.compile(r"^\*\*([A-Za-z][A-Za-z _-]*?)(?:\s+\(([^)]+)\))?:\*\*\s*(.*)$")
-_HEADING_RE = re.compile(r"^##\s+(\d{2}:\d{2})(?:\s+([A-Z]{3,5}))?", re.MULTILINE)
+# "## HH:MM TZ · channel · device (trigger)". Captures: time, tz, label.
+_HEADING_RE = re.compile(
+    r"^##\s+(\d{2}:\d{2})(?:\s+([A-Z]{3,5}))?(?:\s+·\s+(.+?))?[ \t]*$", re.MULTILINE)
+_LABEL_CLEAN_RE = re.compile(r"[^\w .@-]+")
 _PHOTO_RE = re.compile(r"!\[\[[^\]]+\]\]")
 _PHOTO_FULL_RE = re.compile(r"^!\[\[[^\]]+\]\]$")
 
@@ -57,6 +75,9 @@ class Message:
     photos: list[str] = field(default_factory=list)
     agent: str = DEFAULT_AGENT
     date: str | None = None
+    channel: str | None = None
+    device: str | None = None
+    trigger: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -68,6 +89,9 @@ class Message:
         }
         if self.date:
             d["date"] = self.date
+        for k in ("channel", "device", "trigger"):
+            if getattr(self, k):
+                d[k] = getattr(self, k)
         return d
 
 
@@ -134,7 +158,7 @@ def _ensure_file(path: Path, d: _date, group: str | None = None) -> None:
     frontmatter = (
         "---\n"
         f"date: {d.isoformat()}\n"
-        "channel: signal\n"
+        "channels: []\n"
         + (f'group: "{group}"\n' if group else "")
         + f"tags: [{'chat, group-chat' if group else 'chat'}]\n"
         "---\n"
@@ -289,12 +313,67 @@ def _render_message(msg: Message, group: str | None = None) -> str:
     return "\n".join(body)
 
 
-def _render_heading(when: datetime) -> str:
+def _clean_label(value) -> str:
+    return _LABEL_CLEAN_RE.sub("", str(value or "")).strip()[:60]
+
+
+def section_label(channel: str | None, device: str | None = None,
+                  trigger: str | None = None) -> str:
+    """'signal' / 'voice · boulder-office-voice (wake word)' — the heading's tail."""
+    parts = [_clean_label(channel) or DEFAULT_CHANNEL]
+    dev = _clean_label(device)
+    if dev:
+        trig = _clean_label(trigger)
+        parts.append(f"{dev} ({trig})" if trig else dev)
+    return " · ".join(parts)
+
+
+def parse_label(label: str | None) -> dict:
+    """Inverse of section_label: {'channel', 'device', 'trigger'} (None when absent)."""
+    out = {"channel": None, "device": None, "trigger": None}
+    if not label:
+        return out
+    parts = [p.strip() for p in label.split(" · ")]
+    out["channel"] = parts[0] or None
+    if len(parts) > 1:
+        m = re.match(r"^(.*?)(?:\s+\(([^)]*)\))?$", parts[1])
+        out["device"] = (m.group(1) or "").strip() or None
+        out["trigger"] = (m.group(2) or "").strip() or None
+    return out
+
+
+def _render_heading(when: datetime, label: str | None = None) -> str:
     tz = when.strftime("%Z")
     head = f"## {when.strftime('%H:%M')}"
     if tz:
         head = f"{head} {tz}"
+    if label:
+        head = f"{head} · {label}"
     return head
+
+
+def _fm_list_add(text: str, key: str, value: str) -> str:
+    """Add `value` to the frontmatter flow list `key: [a, b]` (targeted, not a rewrite).
+
+    Creates the line (before `tags:`, else at the end of the block) when missing.
+    """
+    value = _clean_label(value)
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.DOTALL)
+    if not m or not value:
+        return text
+    fm = m.group(1)
+    lm = re.search(rf"^{re.escape(key)}:[ \t]*\[(.*)\][ \t]*$", fm, re.MULTILINE)
+    if lm:
+        items = [x.strip() for x in lm.group(1).split(",") if x.strip()]
+        if value in items:
+            return text
+        items.append(value)
+        fm = fm[:lm.start()] + f"{key}: [{', '.join(items)}]" + fm[lm.end():]
+    else:
+        line = f"{key}: [{value}]\n"
+        tm = re.search(r"^tags:", fm, re.MULTILINE)
+        fm = fm[:tm.start()] + line + fm[tm.start():] if tm else fm + line
+    return "---\n" + fm + "---\n" + text[m.end():]
 
 
 # ---------- Save tools ----------------------------------------------------
@@ -306,10 +385,19 @@ def save_message(
     photos=None,
     agent: str = DEFAULT_AGENT,
     group: str | None = None,
+    channel: str = DEFAULT_CHANNEL,
+    device: str | None = None,
+    trigger: str | None = None,
 ) -> dict:
     """Append a single message to today's (or timestamp's) chat file.
 
-    With `group`, writes to Chats/Signal/Groups/<group>/... and accepts any sender name.
+    `channel` (signal / voice / control-ui …), and for voice `device` and `trigger`,
+    go in the section heading. A message from Steven (or any non-agent sender) opens
+    a new section unless it lands in the same minute and channel as the last one; a
+    Memento/system message joins the last section when it is on the same channel and
+    started within REPLY_WINDOW_MIN minutes, so an exchange stays under one heading.
+
+    With `group`, writes to Chats/Groups/<group>/... and accepts any sender name.
     """
     if not text and not photos:
         raise ValueError("save_message: text and photos cannot both be empty")
@@ -324,6 +412,7 @@ def save_message(
 
     photo_links = [_normalize_photo(p, d) for p in (photos or [])]
 
+    label = section_label(channel, device, trigger)
     msg = Message(
         timestamp=_render_heading(when).removeprefix("## "),
         sender=sender,
@@ -333,31 +422,41 @@ def save_message(
     )
 
     file_path = _chat_file(d, group)
-    new_heading = _render_heading(when).strip()
+    new_heading = _render_heading(when, label).strip()
     rendered_msg = _render_message(msg, group)
 
     with _file_lock(file_path):
         _ensure_file(file_path, d, group)
         existing = file_path.read_text()
 
-        last_heading_text = None
+        last = None
         for hm in _HEADING_RE.finditer(existing):
-            line_end = existing.find("\n", hm.end())
-            if line_end == -1:
-                line_end = len(existing)
-            last_heading_text = existing[hm.start():line_end].strip()
+            last = hm
 
-        if last_heading_text == new_heading:
+        join = False
+        if last is not None:
+            if last.group(0).strip() == new_heading:
+                join = True
+            elif sender in ("Memento", "system") and (last.group(3) or "").strip() == label:
+                hh, mm = map(int, last.group(1).split(":"))
+                gap = (when.hour * 60 + when.minute) - (hh * 60 + mm)
+                join = 0 <= gap <= REPLY_WINDOW_MIN
+
+        if join:
             new_content = existing.rstrip() + "\n\n" + rendered_msg + "\n"
         else:
             new_content = existing.rstrip() + "\n\n" + new_heading + "\n" + rendered_msg + "\n"
 
+        new_content = _fm_list_add(new_content, "channels", _clean_label(channel) or DEFAULT_CHANNEL)
+        if device:
+            new_content = _fm_list_add(new_content, "devices", device)
         file_path.write_text(new_content)
 
     return {
         "path": str(file_path),
         "timestamp": msg.timestamp,
         "speaker": _speaker_label(sender, agent, group),
+        "section": label,
     }
 
 
@@ -368,13 +467,18 @@ def save_exchange(
     steven_photos=None,
     memento_photos=None,
     agent: str = DEFAULT_AGENT,
+    channel: str = DEFAULT_CHANNEL,
+    device: str | None = None,
+    trigger: str | None = None,
 ) -> dict:
+    where = {"channel": channel, "device": device, "trigger": trigger}
     s = save_message(
         sender="Steven",
         text=steven_text,
         timestamp=timestamp,
         photos=steven_photos,
         agent=agent,
+        **where,
     )
     m = save_message(
         sender="Memento",
@@ -382,6 +486,7 @@ def save_exchange(
         timestamp=timestamp,
         photos=memento_photos,
         agent=agent,
+        **where,
     )
     return {"path": s["path"], "messages": [s, m]}
 
@@ -412,6 +517,7 @@ def _parse_chat_file(path: Path) -> list[Message]:
 
     messages = []
     current_heading = None
+    current_where = parse_label(None)
     current = None
 
     def _flush():
@@ -428,6 +534,7 @@ def _parse_chat_file(path: Path) -> list[Message]:
         if m:
             _flush()
             current_heading = (m.group(1), m.group(2) or "")
+            current_where = parse_label(m.group(3))
             continue
 
         m = _SPEAKER_RE.match(line)
@@ -444,6 +551,7 @@ def _parse_chat_file(path: Path) -> list[Message]:
                 text="",
                 agent=(agent_tag or DEFAULT_AGENT).strip(),
                 date=file_date.isoformat() if file_date else None,
+                **current_where,
             )
             inline_photos = _PHOTO_RE.findall(rest)
             text_remainder = _PHOTO_RE.sub("", rest).strip()
@@ -525,7 +633,7 @@ def get_recent(limit: int, since=None) -> list[dict]:
     return [m.to_dict() for m in collected]
 
 
-def search(query: str, since=None, until=None, sender=None) -> list[dict]:
+def search(query: str, since=None, until=None, sender=None, channel=None) -> list[dict]:
     if not query:
         return []
     q = query.lower()
@@ -543,6 +651,8 @@ def search(query: str, since=None, until=None, sender=None) -> list[dict]:
             continue
         for m in _parse_chat_file(path):
             if sender and m.sender != sender:
+                continue
+            if channel and (m.channel or DEFAULT_CHANNEL) != channel:
                 continue
             if q in m.text.lower():
                 results.append(m)
@@ -586,13 +696,69 @@ def get_summary(date_from=None, date_to=None) -> dict:
     }
 
 
+# ---------- One-time migration from Chats/Signal/ --------------------------
+
+_LEGACY_HEADING_RE = re.compile(r"^(##\s+\d{2}:\d{2}(?:\s+[A-Z]{3,5})?)[ \t]*$", re.MULTILINE)
+
+
+def migrate_from_signal(dry_run: bool = False) -> dict:
+    """Move the pre-2026-11 layout Chats/Signal/... into Chats/... (idempotent).
+
+    Day files: headings gain ' · signal', `channel: signal` becomes
+    `channels: [signal]`, and wikilinks into Chats/Signal/ are repointed.
+    Attachment dirs move as they are. Refuses to overwrite an existing target.
+    """
+    legacy = CHAT_ROOT / "Signal"
+    moved, rewritten, conflicts = 0, 0, []
+    if not legacy.exists():
+        return {"moved": 0, "rewritten": 0, "conflicts": [], "note": "nothing to migrate"}
+
+    files = sorted(p for p in legacy.rglob("*") if p.is_file())
+    for src in files:
+        dest = CHAT_ROOT / src.relative_to(legacy)
+        if dest.exists():
+            conflicts.append(str(dest))
+    if conflicts:
+        return {"moved": 0, "rewritten": 0, "conflicts": conflicts}
+
+    vault = Path(VAULT_DIR)
+    old_prefix = str(legacy.relative_to(vault)) + "/"
+    new_prefix = str(CHAT_ROOT.relative_to(vault)) + "/"
+    for src in files:
+        dest = CHAT_ROOT / src.relative_to(legacy)
+        if src.suffix == ".md" and _is_iso_date(src.stem):
+            text = src.read_text()
+            new = _LEGACY_HEADING_RE.sub(r"\1 · signal", text)
+            new = re.sub(r"^channel:[ \t]*signal[ \t]*$", "channels: [signal]", new,
+                         count=1, flags=re.MULTILINE)
+            new = new.replace("[[" + old_prefix, "[[" + new_prefix)
+            if new != text:
+                rewritten += 1
+            if not dry_run:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(new)
+                src.unlink()
+        elif not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+        moved += 1
+
+    if not dry_run:
+        for d in sorted((p for p in legacy.rglob("*") if p.is_dir()), reverse=True):
+            with contextlib.suppress(OSError):
+                d.rmdir()
+        with contextlib.suppress(OSError):
+            legacy.rmdir()
+    return {"moved": moved, "rewritten": rewritten, "conflicts": [], "dry_run": dry_run}
+
+
 # ---------- CLI -----------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse
     import json
 
-    parser = argparse.ArgumentParser(description="chat-signal-db CLI for testing")
+    parser = argparse.ArgumentParser(description="chat-log CLI for testing")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_save = sub.add_parser("save")
@@ -608,6 +774,10 @@ if __name__ == "__main__":
     p_search.add_argument("query")
 
     p_summary = sub.add_parser("summary")
+
+    p_migrate = sub.add_parser("migrate-from-signal",
+                               help="one-time move of Chats/Signal/ into Chats/")
+    p_migrate.add_argument("--dry-run", action="store_true")
 
     p_dates = sub.add_parser("dates")
     p_dates.add_argument("--year", type=int)
@@ -625,5 +795,7 @@ if __name__ == "__main__":
         print(json.dumps(search(args.query), indent=2))
     elif args.cmd == "summary":
         print(json.dumps(get_summary(), indent=2))
+    elif args.cmd == "migrate-from-signal":
+        print(json.dumps(migrate_from_signal(dry_run=args.dry_run), indent=2))
     elif args.cmd == "dates":
         print(json.dumps(get_dates(year=args.year, month=args.month), indent=2))

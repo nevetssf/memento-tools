@@ -22,6 +22,10 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 - **Vault search** — keyword / structural search across the vault.
 - **Cellar inventory** — list / search / rate bottles.
 - **Todoist** — list, create, complete tasks across projects and labels.
+- **Chat log** — every exchange between Steven and the agent, whatever the channel
+  (Signal, voice devices, Control UI), archived to `Chats/YYYY/MM/YYYY-MM-DD.md` with the
+  channel on each section heading. `chat_reconcile.py` reads OpenClaw's transcripts
+  every minute (see [docs/openclaw-transcripts.md](docs/openclaw-transcripts.md)).
 - **Format converters** — turn PDFs and HTML files into sidecar `.md` files so they
   show up cleanly in Obsidian and embed well.
 
@@ -46,6 +50,8 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 ├── vault-embed-mcp.py           index_vault, semantic_search, search_recent,
 │                                index_progress, enrich_metadata, index_status
 ├── todoist-mcp.py               list/add/complete/update/delete tasks
+├── chat-log-mcp.py              chat_search (channel filter), chat_get_today,
+│                                chat_get_recent, chat_get_by_date, chat_get_summary
 │
 │  Underlying scripts (also runnable from the CLI)
 ├── people.py                    Relationship CRUD + inference engine
@@ -58,6 +64,8 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 ├── journal-photo-log.py         Copy a photo into Journal/YYYY/photos/, log it
 ├── journal-pdf.py               Render a journal day as a styled PDF
 ├── priorities.py                Daily priorities tracker
+├── chat_log.py                  Chat log store (channel-tagged day files, search)
+├── chat_reconcile.py            OpenClaw agent DB → chat log, every 60 s (timer)
 ├── priorities-rollover.py       Move yesterday's open items to today
 ├── localtime.py                 Local time/date for Steven's current location
 ├── vault-search.py              Full-text search across vault sections
@@ -97,8 +105,9 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_FACES_DB_PATH` | `$DATA_DIR/faces.db` | Face-recognition database |
 | `MEMENTO_FACES_REVIEW_DIR` | `$DATA_DIR/faces-review` | Face cluster contact sheets |
 | `MEMENTO_LOCALTIME_ALIASES_FILE` | `$DATA_DIR/localtime-aliases.json` | Learned place-name aliases for `localtime.py` |
-| `MEMENTO_CHAT_RECONCILE_STATE_FILE` | `$DATA_DIR/chat_reconcile_state.json` | Per-transcript read offsets for `chat_reconcile.py` |
-| `MEMENTO_OPENCLAW_SESSIONS_JSON` | `~/.openclaw/agents/main/sessions/sessions.json` | OpenClaw session index read by `chat_reconcile.py` |
+| `MEMENTO_CHAT_RECONCILE_STATE_FILE` | `$DATA_DIR/chat_reconcile_state.json` | Per-session transcript cursors (`seq`) for `chat_reconcile.py` |
+| `MEMENTO_OPENCLAW_AGENT_DB` | `~/.openclaw/agents/main/agent/openclaw-agent.sqlite` | OpenClaw sessions + transcripts, read-only by `chat_reconcile.py` |
+| `MEMENTO_CHAT_DIR` | `$VAULT_DIR/Chats` | Chat log root (groups under `Groups/`) |
 | `MEMENTO_PEOPLE_DIR` | `$VAULT/People` | Folder for per-person Obsidian notes |
 | `MEMENTO_CELLAR_DIR` | `$VAULT/Cellar` | Wine/spirits notes |
 | `MEMENTO_TEMPLATES_DIR` | `$VAULT/Templates` | Note templates (cellar uses these) |

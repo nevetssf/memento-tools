@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-chat-signal-mcp.py — MCP server for the chat-signal-db.
+chat-log-mcp.py — MCP server "chat-log" (formerly chat-signal-db).
 
-Persistent record of Steven's Signal exchanges with the agent (Memento), stored
-under VAULT_DIR/Chats/Signal/YYYY/MM/. One Markdown file per day, photos in a
-per-month directory.
+Persistent record of Steven's conversation with the agent (Memento) across every
+channel (Signal, voice devices, Control UI), stored under VAULT_DIR/Chats/YYYY/MM/.
+One Markdown file per day; each exchange is a section whose heading names its
+channel (and device/trigger for voice). Photos in a per-month directory. Written by
+chat_reconcile.py from OpenClaw's transcripts.
 
 Distinct from journal-db: journal entries are Steven's logged life events;
 chats are the full transcript of his exchanges with the agent.
@@ -24,9 +26,9 @@ from mcp.server.stdio import stdio_server
 SCRIPTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import chat_signal as cs
+import chat_log as cs
 
-app = Server("chat-signal-db")
+app = Server("chat-log")
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +42,7 @@ async def list_tools() -> list[types.Tool]:
         "items": {"type": "string"},
         "description": (
             "List of source filesystem paths (e.g. '/tmp/photo.jpg') and/or "
-            "pre-formed Obsidian wikilinks like '![[Chats/Signal/.../foo.jpg]]'. "
+            "pre-formed Obsidian wikilinks like '![[Chats/2026/11/photos/foo.jpg]]'. "
             "Source paths are auto-moved into the month's photos dir; wikilinks "
             "are passed through."
         ),
@@ -60,6 +62,15 @@ async def list_tools() -> list[types.Tool]:
         ),
         "default": "main",
     }
+    channel_arg = {
+        "type": "string",
+        "description": (
+            "Channel the message came through: 'signal', 'voice', 'control-ui', ... "
+            "Shown in the section heading. Default 'signal'."
+        ),
+    }
+    device_arg = {"type": "string", "description": "Voice/display device name (voice only)."}
+    trigger_arg = {"type": "string", "description": "Voice trigger: 'push-to-talk' or 'wake word'."}
     date_arg = {
         "type": "string",
         "description": "ISO date 'YYYY-MM-DD'. Defaults to today.",
@@ -86,6 +97,9 @@ async def list_tools() -> list[types.Tool]:
                     "timestamp": timestamp_arg,
                     "photos": photo_arg,
                     "agent": agent_arg,
+                    "channel": channel_arg,
+                    "device": device_arg,
+                    "trigger": trigger_arg,
                 },
                 "required": ["sender", "text"],
             },
@@ -105,6 +119,9 @@ async def list_tools() -> list[types.Tool]:
                     "steven_photos": photo_arg,
                     "memento_photos": photo_arg,
                     "agent": agent_arg,
+                    "channel": channel_arg,
+                    "device": device_arg,
+                    "trigger": trigger_arg,
                 },
                 "required": ["steven_text", "memento_text"],
             },
@@ -209,7 +226,8 @@ async def list_tools() -> list[types.Tool]:
             name="chat_search",
             description=(
                 "Case-insensitive substring search across chat files. Optionally "
-                "filter by date range and/or sender."
+                "filter by date range, sender and/or channel. Each result carries its "
+                "channel (and device/trigger for voice)."
             ),
             inputSchema={
                 "type": "object",
@@ -220,6 +238,10 @@ async def list_tools() -> list[types.Tool]:
                     "sender": {
                         "type": "string",
                         "enum": ["Steven", "Memento", "system"],
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Only this channel, e.g. 'signal' or 'voice'.",
                     },
                 },
                 "required": ["query"],
@@ -292,6 +314,9 @@ def _dispatch(name: str, args: dict):
             timestamp=args.get("timestamp"),
             photos=args.get("photos") or None,
             agent=args.get("agent", cs.DEFAULT_AGENT),
+            channel=args.get("channel") or cs.DEFAULT_CHANNEL,
+            device=args.get("device"),
+            trigger=args.get("trigger"),
         )
     if name == "chat_save_exchange":
         return cs.save_exchange(
@@ -301,6 +326,9 @@ def _dispatch(name: str, args: dict):
             steven_photos=args.get("steven_photos") or None,
             memento_photos=args.get("memento_photos") or None,
             agent=args.get("agent", cs.DEFAULT_AGENT),
+            channel=args.get("channel") or cs.DEFAULT_CHANNEL,
+            device=args.get("device"),
+            trigger=args.get("trigger"),
         )
     if name == "chat_save_attachment":
         return cs.save_attachment(
@@ -329,6 +357,7 @@ def _dispatch(name: str, args: dict):
             since=args.get("since"),
             until=args.get("until"),
             sender=args.get("sender"),
+            channel=args.get("channel"),
         )
     if name == "chat_get_dates":
         return cs.get_dates(year=args.get("year"), month=args.get("month"))

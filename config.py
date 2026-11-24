@@ -49,9 +49,12 @@ LOCATION_FILE = Path(os.environ.get("MEMENTO_LOCATION_FILE",
     str(Path.home() / ".openclaw/workspace/LOCATION.md")))
 SOUL_FILE = Path(os.environ.get("MEMENTO_SOUL_FILE",
     str(Path.home() / ".openclaw/workspace/SOUL.md")))
-# OpenClaw's session index — chat_reconcile.py reads it to find agent transcripts
-OPENCLAW_SESSIONS_JSON = Path(os.environ.get("MEMENTO_OPENCLAW_SESSIONS_JSON",
-    str(Path.home() / ".openclaw/agents/main/sessions/sessions.json")))
+# OpenClaw's agent database (sessions + transcripts since 2026.10.9). chat_reconcile.py
+# reads it read-only; its schema is internal, see docs/openclaw-transcripts.md.
+OPENCLAW_AGENT_DB = Path(os.environ.get("MEMENTO_OPENCLAW_AGENT_DB",
+    str(Path.home() / ".openclaw/agents/main/agent/openclaw-agent.sqlite")))
+# Where conversation transcripts are archived (all channels; groups under Groups/)
+CHAT_DIR = Path(os.environ.get("MEMENTO_CHAT_DIR", str(VAULT_DIR / "Chats")))
 
 # Obsidian templates directory
 TEMPLATES_DIR = Path(os.environ.get("MEMENTO_TEMPLATES_DIR", str(VAULT_DIR / "Templates")))
