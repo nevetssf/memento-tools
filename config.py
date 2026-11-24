@@ -57,6 +57,10 @@ OPENCLAW_AGENT_DB = Path(os.environ.get("MEMENTO_OPENCLAW_AGENT_DB",
 # its per-device `spoke` events; the token comes from ~/.openclaw/.env (EINK_API_TOKEN).
 EINK_API_URL = os.environ.get("MEMENTO_EINK_API_URL", "http://boulder-server:8790")
 EINK_API_TOKEN = os.environ.get("EINK_API_TOKEN", "")
+# memento_health.py: check state (DATA_DIR) and the status note at the vault root
+HEALTH_STATE_FILE = Path(os.environ.get("MEMENTO_HEALTH_STATE_FILE",
+    str(DATA_DIR / "health_state.json")))
+HEALTH_NOTE = Path(os.environ.get("MEMENTO_HEALTH_NOTE", str(VAULT_DIR / "health.md")))
 # Where conversation transcripts are archived (all channels; groups under Groups/)
 CHAT_DIR = Path(os.environ.get("MEMENTO_CHAT_DIR", str(VAULT_DIR / "Chats")))
 

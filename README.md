@@ -22,6 +22,11 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 - **Vault search** — keyword / structural search across the vault.
 - **Cellar inventory** — list / search / rate bottles.
 - **Todoist** — list, create, complete tasks across projects and labels.
+- **Health checks** — `memento_health.py` checks OpenClaw/Memento and everything it
+  depends on (gateway, Signal, failed runs, cron, MCP servers, memory index, vault-embed,
+  DGX, display bridge, backups, disk…) every 15 min and daily, pushes ntfy on failure and
+  recovery, and writes `health.md` at the vault root. A cron job on boulder-server alerts
+  if its heartbeat stops.
 - **Chat log** — every exchange between Steven and the agent, whatever the channel
   (Signal, voice devices, Control UI), archived to `Chats/YYYY/MM/YYYY-MM-DD.md` with the
   channel on each section heading. `chat_reconcile.py` reads OpenClaw's transcripts
@@ -66,6 +71,7 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
 ├── priorities.py                Daily priorities tracker
 ├── chat_log.py                  Chat log store (channel-tagged day files, search)
 ├── chat_reconcile.py            OpenClaw agent DB → chat log, every 60 s (timer)
+├── memento_health.py            Scheduled health checks (fast 15 min / daily), ntfy alerts, vault health.md
 ├── priorities-rollover.py       Move yesterday's open items to today
 ├── localtime.py                 Local time/date for Steven's current location
 ├── vault-search.py              Full-text search across vault sections
@@ -107,6 +113,9 @@ defaults for Steven's setup. Override what you need:
 | `MEMENTO_LOCALTIME_ALIASES_FILE` | `$DATA_DIR/localtime-aliases.json` | Learned place-name aliases for `localtime.py` |
 | `MEMENTO_CHAT_RECONCILE_STATE_FILE` | `$DATA_DIR/chat_reconcile_state.json` | Per-session transcript cursors (`seq`) for `chat_reconcile.py` |
 | `MEMENTO_OPENCLAW_AGENT_DB` | `~/.openclaw/agents/main/agent/openclaw-agent.sqlite` | OpenClaw sessions + transcripts, read-only by `chat_reconcile.py` |
+| `MEMENTO_HEALTH_STATE_FILE` | `$DATA_DIR/health_state.json` | `memento_health.py` per-check state |
+| `MEMENTO_HEALTH_NOTE` | `$VAULT_DIR/health.md` | Health status note |
+| `MEMENTO_EINK_API_URL` / `EINK_API_TOKEN` | `http://boulder-server:8790` / from `~/.openclaw/.env` | Display bridge, for spoken-announcement archiving and health checks |
 | `MEMENTO_CHAT_DIR` | `$VAULT_DIR/Chats` | Chat log root (groups under `Groups/`) |
 | `MEMENTO_PEOPLE_DIR` | `$VAULT/People` | Folder for per-person Obsidian notes |
 | `MEMENTO_CELLAR_DIR` | `$VAULT/Cellar` | Wine/spirits notes |
