@@ -26,6 +26,10 @@ the last alerted error sits beside it in chat_reconcile_state.alert. The first r
 (everything at or before it is treated as already archived) so a missing state file
 can never re-append the whole history.
 
+Spoken announcements (the `speak` tool, which isn't in the transcript) come from the
+display bridge's per-device `spoke` events and are logged as
+`voice · <device> (agent-initiated <reason>)` or `(requested)`.
+
 Failures exit 1 and push one ntfy notification per distinct error (and one when it
 recovers), so this can't fail silently again.
 
@@ -40,6 +44,8 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,7 +55,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import chat_log as cl
 import localtime
-from config import LOCATION_FILE, CHAT_RECONCILE_STATE_FILE, OPENCLAW_AGENT_DB
+from config import (LOCATION_FILE, CHAT_RECONCILE_STATE_FILE, OPENCLAW_AGENT_DB,
+                    EINK_API_URL, EINK_API_TOKEN)
 
 STATE_FILE = CHAT_RECONCILE_STATE_FILE
 STATE_VERSION = 2
@@ -73,6 +80,8 @@ DEVICE_ALIASES = {"Office": "boulder-office-voice", "memento-voice": "boulder-of
 # Voice devices with no button: always "wake word" (the wrapper labelled their first
 # turns push-to-talk before it had a wake-word note).
 WAKE_WORD_ONLY_DEVICES = {"boulder-office-voice"}
+# The bridge can be down briefly (deploys, restarts); only alert after this long.
+BRIDGE_GRACE_S = 15 * 60
 SKIP_ASSISTANT_TEXT = {"NO_REPLY", "HEARTBEAT_OK"}
 
 _META_BLOCK_RE = re.compile(
@@ -303,6 +312,77 @@ def _reconcile_session(con, session_id, session_key, state, tz, dry_run) -> tupl
     return written, skipped
 
 
+# ---------- spoken output (bridge `spoke` events) ---------------------------
+
+def _bridge_get(path: str):
+    req = urllib.request.Request(f"{EINK_API_URL}{path}",
+                                 headers={"Authorization": f"Bearer {EINK_API_TOKEN}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def spoke_trigger(reason: str | None) -> str:
+    reason = (reason or "requested").strip()
+    return "requested" if reason == "requested" else f"agent-initiated {reason}"
+
+
+def _reconcile_spoken(state: dict, tz: ZoneInfo, dry_run: bool) -> int:
+    """Archive what Memento said aloud through `speak` (bridge `spoke` events, ok only).
+
+    Tool calls aren't in OpenClaw's transcript, so this is the only record of spoken
+    announcements. Refused attempts are skipped: Memento sends those on Signal, which
+    the transcript captures. The bridge keeps events in memory (its seq resets on
+    restart), so the cursor is the last event timestamp per device; a device seen for
+    the first time starts from now. Raises ReconcileError after BRIDGE_GRACE_S of the
+    bridge being unreachable.
+    """
+    if not EINK_API_TOKEN:
+        raise ReconcileError("EINK_API_TOKEN not set (chat-reconcile.service reads "
+                             "~/.openclaw/.env); spoken announcements aren't archived")
+    cursors = state.setdefault("spoke_ts", {})
+    try:
+        devices = _bridge_get("/api/devices")
+        batches = []
+        for d in devices:
+            dev_id = d.get("id")
+            if not dev_id:
+                continue
+            if dev_id not in cursors:
+                cursors[dev_id] = time.time()
+                continue
+            batches.append((d, _bridge_get(f"/api/devices/{dev_id}/events?since=0&limit=200")))
+    except (OSError, ValueError) as e:
+        since = state.setdefault("bridge_fail_since", time.time())
+        if time.time() - since > BRIDGE_GRACE_S:
+            raise ReconcileError(f"display bridge unreachable for "
+                                 f"{int((time.time() - since) / 60)} min ({EINK_API_URL}): {e}")
+        return 0
+    state.pop("bridge_fail_since", None)
+
+    written = 0
+    for d, events in batches:
+        dev_id = d["id"]
+        name = d.get("name") or dev_id
+        label = DEVICE_ALIASES.get(name, name)
+        last = cursors[dev_id]
+        for e in sorted(events, key=lambda e: e.get("ts", 0)):
+            ts = e.get("ts") or 0
+            data = e.get("data") or {}
+            if e.get("type") != "spoke" or ts <= cursors[dev_id]:
+                continue
+            last = max(last, ts)
+            text = (data.get("text") or "").strip()
+            if not data.get("ok") or not text:
+                continue
+            if not dry_run:
+                cl.save_message(sender="Memento", text=text,
+                                timestamp=datetime.fromtimestamp(ts, tz), channel="voice",
+                                device=label, trigger=spoke_trigger(data.get("reason")))
+            written += 1
+        cursors[dev_id] = last
+    return written
+
+
 def reconcile(init_cutoff: str | None = None, dry_run: bool = False) -> dict:
     con = _connect()
     state = _load_state()
@@ -323,11 +403,12 @@ def reconcile(init_cutoff: str | None = None, dry_run: bool = False) -> dict:
             w, s = _reconcile_session(con, sid, key, state, tz, dry_run)
             total_w += w
             total_s += s
+        spoken = _reconcile_spoken(state, tz, dry_run)
     finally:
         if not dry_run:
             _save_state(state)
     return {"messages_written": total_w, "events_skipped": total_s,
-            "sessions": len(sessions), "dry_run": dry_run}
+            "spoken_written": spoken, "sessions": len(sessions), "dry_run": dry_run}
 
 
 def _notify(title: str, body: str, priority: str = "high", tags: str = "warning") -> None:
