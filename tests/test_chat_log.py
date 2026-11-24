@@ -185,7 +185,8 @@ class TestReconcile(TempVault):
                     patch.object(cr, "STATE_FILE", self.state),
                     patch.object(cr, "ALERT_FILE", self.state.with_suffix(".alert")),
                     patch.object(cr, "_local_zone", lambda: DEN),
-                    patch.object(cr, "_notify", lambda *a, **k: None)]
+                    patch.object(cr, "_notify", lambda *a, **k: None),
+                    patch.object(cr, "_reconcile_spoken", lambda *a, **k: 0)]
         for p in self._rp:
             p.start()
 
@@ -234,6 +235,57 @@ class TestReconcile(TempVault):
             cr.reconcile(init_cutoff="1970-01-01T00:00:00Z")
             self.assertEqual(cr.main(), 0)
             self.assertEqual(sent, ["chat-reconcile failing", "chat-reconcile recovered"])
+
+
+class TestSpoken(TempVault):
+    DEVICES = [{"id": "boulder-office-voice", "name": "Office"}]
+
+    def _events(self, *evs):
+        return lambda path: self.DEVICES if path == "/api/devices" else list(evs)
+
+    def test_logs_ok_spoke_events_after_cursor(self):
+        state = {"spoke_ts": {"boulder-office-voice": 1795539000.0}}
+        t1 = at(10, 5).timestamp()
+        evs = [
+            {"seq": 1, "ts": 1795538000.0, "type": "spoke",
+             "data": {"text": "old", "reason": "reminder", "ok": True}},
+            {"seq": 2, "ts": t1, "type": "spoke",
+             "data": {"text": "Your call starts in ten minutes.", "reason": "reminder", "ok": True}},
+            {"seq": 3, "ts": t1 + 1, "type": "audio_done", "data": {}},
+            {"seq": 4, "ts": t1 + 60, "type": "spoke",
+             "data": {"text": "refused", "reason": "alert", "ok": False, "refused": "muted"}},
+            {"seq": 5, "ts": t1 + 120, "type": "spoke",
+             "data": {"text": "Hi there.", "reason": "requested", "ok": True}},
+        ]
+        with patch.object(cr, "EINK_API_TOKEN", "t"), \
+             patch.object(cr, "_bridge_get", self._events(*evs)):
+            self.assertEqual(cr._reconcile_spoken(state, DEN, False), 2)
+            self.assertEqual(cr._reconcile_spoken(state, DEN, False), 0)
+        text = self.day()
+        self.assertIn("## 10:05 MST · voice · boulder-office-voice (agent-initiated reminder)\n"
+                      "**Memento:** Your call starts in ten minutes.", text)
+        self.assertIn("voice · boulder-office-voice (requested)\n**Memento:** Hi there.", text)
+        self.assertNotIn("old", text)
+        self.assertNotIn("refused", text)
+        self.assertEqual(state["spoke_ts"]["boulder-office-voice"], t1 + 120)
+
+    def test_new_device_starts_from_now(self):
+        state = {}
+        evs = [{"seq": 1, "ts": 1.0, "type": "spoke", "data": {"text": "x", "ok": True}}]
+        with patch.object(cr, "EINK_API_TOKEN", "t"), \
+             patch.object(cr, "_bridge_get", self._events(*evs)):
+            self.assertEqual(cr._reconcile_spoken(state, DEN, False), 0)
+        self.assertIn("boulder-office-voice", state["spoke_ts"])
+
+    def test_bridge_down_tolerated_then_alerts(self):
+        def down(path):
+            raise OSError("connection refused")
+        state = {"spoke_ts": {}}
+        with patch.object(cr, "EINK_API_TOKEN", "t"), patch.object(cr, "_bridge_get", down):
+            self.assertEqual(cr._reconcile_spoken(state, DEN, False), 0)
+            state["bridge_fail_since"] -= cr.BRIDGE_GRACE_S + 1
+            with self.assertRaisesRegex(cr.ReconcileError, "unreachable"):
+                cr._reconcile_spoken(state, DEN, False)
 
 
 if __name__ == "__main__":

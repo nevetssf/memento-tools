@@ -53,6 +53,10 @@ SOUL_FILE = Path(os.environ.get("MEMENTO_SOUL_FILE",
 # reads it read-only; its schema is internal, see docs/openclaw-transcripts.md.
 OPENCLAW_AGENT_DB = Path(os.environ.get("MEMENTO_OPENCLAW_AGENT_DB",
     str(Path.home() / ".openclaw/agents/main/agent/openclaw-agent.sqlite")))
+# Display/voice bridge (esp32-s3-agent-display on boulder-server). chat_reconcile.py reads
+# its per-device `spoke` events; the token comes from ~/.openclaw/.env (EINK_API_TOKEN).
+EINK_API_URL = os.environ.get("MEMENTO_EINK_API_URL", "http://boulder-server:8790")
+EINK_API_TOKEN = os.environ.get("EINK_API_TOKEN", "")
 # Where conversation transcripts are archived (all channels; groups under Groups/)
 CHAT_DIR = Path(os.environ.get("MEMENTO_CHAT_DIR", str(VAULT_DIR / "Chats")))
 
