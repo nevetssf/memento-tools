@@ -26,7 +26,8 @@ that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can us
   depends on (gateway, Signal, failed runs, cron, MCP servers, memory index, vault-embed,
   DGX, display bridge, backups, disk…) every 15 min and daily, pushes ntfy on failure and
   recovery, and writes `health.md` at the vault root. A cron job on boulder-server alerts
-  if its heartbeat stops.
+  if its heartbeat stops. Every check, its thresholds and what to do when it fails:
+  [docs/health-checks.md](docs/health-checks.md).
 - **Chat log** — every exchange between Steven and the agent, whatever the channel
   (Signal, voice devices, Control UI), archived to `Chats/YYYY/MM/YYYY-MM-DD.md` with the
   channel on each section heading. `chat_reconcile.py` reads OpenClaw's transcripts

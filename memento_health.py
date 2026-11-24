@@ -36,7 +36,7 @@ import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -45,7 +45,7 @@ SCRIPTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from config import (CHAT_RECONCILE_STATE_FILE, EINK_API_TOKEN, EINK_API_URL,
-                    HEALTH_NOTE, HEALTH_STATE_FILE, OPENCLAW_AGENT_DB)
+                    HEALTH_NOTE, HEALTH_STATE_FILE, LOCATION_FILE, OPENCLAW_AGENT_DB)
 
 HOME = Path.home()
 # systemd gives a minimal PATH; the openclaw CLI is a node script (#!/usr/bin/env node).
@@ -66,6 +66,10 @@ RESTIC_REPOS = {
                 HOME / ".config/restic/servemeboulder.passphrase"),
 }
 DENVER = ZoneInfo("America/Denver")
+GATEWAY_LOG_DIR = Path("/tmp/openclaw")          # openclaw-YYYY-MM-DD.log (UTC dates), JSON lines
+ALIVE_PUSH_EVERY_S = 7 * 86400                   # weekly "monitor alive" push proves ntfy works
+DOC = "memento-tools/docs/health-checks.md"
+LAST_REVIEWED = "2026-11-24"                     # bump after reviewing docs/health-checks.md
 
 
 # ---------- framework ---------------------------------------------------------
@@ -415,6 +419,71 @@ def _failed_units(ctx):
     return fail(", ".join(names)) if names else ok("none")
 
 
+def _gateway_log_lines(hours: int):
+    """Yield parsed gateway log records from the last `hours` (today's and yesterday's files)."""
+    cutoff = time.time() - hours * 3600
+    for day in (time.time() - 86400, time.time()):
+        f = GATEWAY_LOG_DIR / f"openclaw-{datetime.fromtimestamp(day, timezone.utc):%Y-%m-%d}.log"
+        if not f.exists() or f.stat().st_mtime < cutoff:
+            continue
+        with open(f, errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                meta = rec.get("_meta") or {}
+                when = meta.get("date") or rec.get("time")
+                if when:
+                    try:
+                        if datetime.fromisoformat(str(when).replace("Z", "+00:00")).timestamp() < cutoff:
+                            continue
+                    except ValueError:
+                        pass
+                yield rec
+
+
+@check("signal_traffic", "daily", "Signal messages flowing")
+def _signal_traffic(ctx):
+    with agent_db() as con:
+        last = con.execute(
+            "select max(created_at) from transcript_events where "
+            "json_extract(event_json, '$.message.__openclaw.transport.channel') = 'signal'"
+        ).fetchone()[0]
+    errors = [str(r.get("1", ""))[:120] for r in _gateway_log_lines(24)
+              if "channels/signal" in str(r.get("0", ""))
+              and (r.get("_meta") or {}).get("logLevelName") in ("ERROR", "FATAL")
+              # a clean signal-cli exit is logged as ERROR on every gateway restart
+              and "exited (source=process code=0" not in str(r.get("1", ""))]
+    last_s = (last or 0) / 1000
+    idle_h = (time.time() - last_s) / 3600
+    detail = f"last message from Steven {ago(last_s) if last else 'never'}; " \
+             f"{len(errors)} Signal error(s) in 24 h" + (f" (latest: {errors[-1]})" if errors else "")
+    if len(errors) > 5 or idle_h > 5 * 24:
+        return fail(detail)
+    if errors or idle_h > 48:
+        return warn(detail)
+    return ok(detail)
+
+
+@check("voice_turns", "daily", "Office voice satellite being used")
+def _voice_turns(ctx):
+    location = LOCATION_FILE.read_text().strip() if Path(LOCATION_FILE).exists() else ""
+    with agent_db() as con:
+        last = con.execute(
+            "select max(created_at) from transcript_events where event_json like ? "
+            "or event_json like ?", ("%[voice · Office%", "%[voice · boulder-office-voice%")
+        ).fetchone()[0]
+    last_s = (last or 0) / 1000
+    idle_d = (time.time() - last_s) / 86400
+    detail = f"last wake-word turn {ago(last_s) if last else 'never'}; Steven is in {location or '?'}"
+    if "boulder" not in location.lower():
+        return ok(detail + " (not checked away from Boulder)")
+    if idle_d > 7:
+        return fail(detail + ": the wake-word path may be broken")
+    return warn(detail) if idle_d > 3 else ok(detail)
+
+
 @check("openclaw_version", "daily", "OpenClaw version and config")
 def _openclaw_version(ctx):
     v = run([OPENCLAW, "--version"], cwd=HOME).stdout.strip().splitlines()[0]
@@ -500,7 +569,8 @@ def write_note(state: dict, now: float) -> None:
         f"- **Daily checks last ran:** {stamp(state.get('daily_ran'))}",
         "",
         "If either time above is more than an hour (fast) or a day (daily) old, the checker "
-        "itself has stopped.",
+        "itself has stopped. What each check means, its thresholds and what to do when it "
+        f"fails: `{DOC}`.",
         "",
         "| | Check | Tier | Detail | Last ok |",
         "|---|---|---|---|---|",
@@ -509,6 +579,8 @@ def write_note(state: dict, now: float) -> None:
         detail = (r.get("detail") or "").replace("|", "\\|").replace("\n", " ")
         lines.append(f"| {icon.get(r.get('status'), '?')} | {r.get('title', name)} | "
                      f"{r.get('tier')} | {detail} | {stamp(r.get('last_ok'))} |")
+    lines += ["", f"_Review these checks every few months (last reviewed: {LAST_REVIEWED}). "
+              "When something breaks that no check caught, add one._"]
     note = Path(HEALTH_NOTE)
     note.parent.mkdir(parents=True, exist_ok=True)
     tmp = note.with_name("." + note.name + ".tmp")
@@ -552,6 +624,14 @@ def main() -> int:
             state[f"{tier}_ran"] = now
     _save_state(state)
     write_note(state, now)
+    if args.tier in ("daily", "all") and now - state.get("alive_push_at", 0) > ALIVE_PUSH_EVERY_S:
+        c = {s: sum(1 for r in state["checks"].values() if r.get("status") == s)
+             for s in ("ok", "warn", "fail")}
+        pushes.append(("🩺 Memento monitor alive",
+                       f"Weekly proof that health alerts reach you. Now: {c['ok']} ok, "
+                       f"{c['warn']} warn, {c['fail']} fail (see health.md).", "low", "stethoscope"))
+        state["alive_push_at"] = now
+        _save_state(state)
     for title, body, prio, tags in pushes:
         notify(title, body, prio, tags)
     if args.tier in ("fast", "all"):
